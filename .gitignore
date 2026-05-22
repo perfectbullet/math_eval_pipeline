@@ -1,0 +1,17 @@
+# IDE
+.claude/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Data & results (regenerable)
+data/model_outputs/
+results/
+
+# Logs
+logs/
+
+# External git repos (use submodule if needed)
+external/Math-Verify/
