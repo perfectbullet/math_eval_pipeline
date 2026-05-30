@@ -21,14 +21,8 @@ from tqdm import tqdm
 
 
 # 数学解题系统提示
-MATH_SYSTEM_PROMPT = """你是一个数学解题专家。请按以下要求回答：
-
-1. 逐步推理，写出完整的解题过程
-2. 在最后给出最终答案，格式为：\\boxed{答案}
-3. 如果是选择题，最终答案给出选项字母，如 \\boxed{A}
-4. 如果是填空题或计算题，给出最终数值或表达式
-
-请确保最终答案明确、无歧义。"""
+# 这个是官方推荐的提示词
+MATH_SYSTEM_PROMPT = """请逐步推理，并将您的最终答案放在\boxed{}内。"""
 
 
 def call_ollama(
@@ -103,7 +97,7 @@ def main():
     output_path = Path(args.output).expanduser()
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # 读取已有结果（断点续跑）
+    # 读取已有结果（断点续跑，只跳过成功的，失败记录重试）
     existing_ids = set()
     if args.skip_existing and output_path.exists():
         with open(output_path, "r", encoding="utf-8") as f:
@@ -111,10 +105,12 @@ def main():
                 line = line.strip()
                 if line:
                     try:
-                        existing_ids.add(json.loads(line)["id"])
+                        rec = json.loads(line)
+                        if rec.get("model_output", ""):
+                            existing_ids.add(rec["id"])
                     except (json.JSONDecodeError, KeyError):
                         continue
-        print(f"已有 {len(existing_ids)} 条结果，将跳过")
+        print(f"已有 {len(existing_ids)} 条成功结果，将跳过")
 
     # 读取输入
     records = []
