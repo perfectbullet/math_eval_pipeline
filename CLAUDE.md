@@ -42,8 +42,14 @@ python scripts/run_math_verify.py \
   --output results/verify/verify_results.jsonl \
   --summary results/verify/verify_summary.md
 
-# 4. PRM 过程评分（仅处理错误样本，需要 GPU）
+# 4a. PRM 过程评分 - DeepSeek（逐步增量评分）
 python scripts/run_deepseek_prm.py \
+  --input results/verify/verify_results.jsonl \
+  --output results/prm/prm_step_scores.jsonl \
+  --summary results/prm/prm_summary.md --limit 50
+
+# 4b. PRM 过程评分 - Qwen（单次前向传播，更高效）
+python scripts/run_qwen_prm.py \
   --input results/verify/verify_results.jsonl \
   --output results/prm/prm_step_scores.jsonl \
   --summary results/prm/prm_summary.md --limit 50
@@ -71,7 +77,7 @@ data/standardized/{math23k,gaokao_bench,linkwise_cot}.jsonl + train_or_eval_all.
 data/model_outputs/model_outputs.jsonl
   ↓ run_math_verify.py
 results/verify/verify_results.jsonl + verify_summary.md
-  ↓ run_deepseek_prm.py (仅错误样本)
+  ↓ run_deepseek_prm.py / run_qwen_prm.py (仅错误样本)
 results/prm/prm_step_scores.jsonl + prm_summary.md
   ↓ build_error_report.py
 results/reports/error_attribution_report.md + error_cases.jsonl
@@ -86,6 +92,8 @@ results/reports/error_attribution_report.md + error_cases.jsonl
 **答案验证**（`run_math_verify.py`）：优先用 `math-verify` 库的 LaTeX/表达式解析，不可用时降级为数值比较或字符串匹配。选择题走独立的选项字母提取逻辑。
 
 **PRM 评分**（`run_deepseek_prm.py`）：`PRMScorer` 类加载 DeepSeek-Math PRM 模型，`split_steps()` 按步骤标记/换行/句号三级降级切分解题过程，逐步骤增量评分（0~1），通过 softmax 归一化 yes/no token。
+
+**PRM 评分 - Qwen**（`run_qwen_prm.py`）：`QwenPRMScorer` 类加载 Qwen2.5-Math-PRM-7B 模型（`AutoModel` + `trust_remote_code`），用 `<extra_0>` 特殊 token 分隔步骤，**单次前向传播**获取所有步骤分数。通过 `make_step_rewards()` 在 `<extra_0>` 位置提取 softmax 正类概率（0~1）。比 DeepSeek PRM 更高效（一次前向 vs N 次增量）。支持 `--torch_dtype auto`（自动根据 GPU 选择 bf16/fp16）。
 
 **归因逻辑**（`build_error_report.py`）：`verify_correct=true → pass`；`extracted_prediction 为空 → answer_extract_error`；有 PRM 结果时按 `min_step_score < 0.45 → logic_error`，`avg_score >= 0.70 → answer_or_render_suspect`；无 PRM → `uncertain`。
 

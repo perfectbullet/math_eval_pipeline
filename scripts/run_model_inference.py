@@ -100,16 +100,31 @@ def main():
     # 读取已有结果（断点续跑，只跳过成功的，失败记录重试）
     existing_ids = set()
     if args.skip_existing and output_path.exists():
+        # 按ID去重：优先保留成功记录，多条失败时保留最后一条
+        best_records = {}  # id -> json line
         with open(output_path, "r", encoding="utf-8") as f:
             for line in f:
-                line = line.strip()
-                if line:
-                    try:
-                        rec = json.loads(line)
-                        if rec.get("model_output", ""):
-                            existing_ids.add(rec["id"])
-                    except (json.JSONDecodeError, KeyError):
-                        continue
+                line_stripped = line.strip()
+                if not line_stripped:
+                    continue
+                try:
+                    rec = json.loads(line_stripped)
+                except (json.JSONDecodeError, KeyError):
+                    continue
+                qid = rec["id"]
+                # 成功记录直接覆盖（优先级最高）
+                if rec.get("model_output", ""):
+                    best_records[qid] = line_stripped
+                    existing_ids.add(qid)
+                elif qid not in best_records:
+                    # 仅在没有成功记录时保留失败记录
+                    best_records[qid] = line_stripped
+
+        # 去重后写回文件
+        with open(output_path, "w", encoding="utf-8") as f:
+            for line in best_records.values():
+                f.write(line + "\n")
+
         print(f"已有 {len(existing_ids)} 条成功结果，将跳过")
 
     # 读取输入

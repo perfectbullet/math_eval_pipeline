@@ -228,6 +228,8 @@ def main():
 
             ref_answer = record.get("reference_answer", "")
             model_output = record.get("model_output", "")
+            # 去掉 <think...>...</think()> 推理过程，只保留正式回复
+            model_output = re.sub(r"<think[^>]*>.*?</think\s*>", "", model_output, flags=re.DOTALL).strip()
             answer_type = record.get("metadata", {}).get("answer_type", "expr")
 
             is_correct, extracted, error = verify_answer(

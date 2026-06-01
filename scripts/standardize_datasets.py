@@ -17,6 +17,7 @@
 import argparse
 import json
 import os
+import random
 import re
 import sys
 from pathlib import Path
@@ -131,49 +132,53 @@ def process_math23k(input_dir: Path, output_dir: Path, limit: int | None) -> tup
     success, skipped = 0, 0
     counter = 0
     output_path = output_dir / "math23k.jsonl"
+    collected = []
 
     json_files = sorted(source_dir.glob("*.json"))
     # 排除非数据文件
     data_files = [f for f in json_files if f.name not in ("package.json",)]
 
-    with open(output_path, "w", encoding="utf-8") as fout:
-        for jf in data_files:
-            print(f"  处理: {jf.name}")
-            with open(jf, "r", encoding="utf-8") as fin:
-                raw = fin.read()
+    for jf in data_files:
+        print(f"  处理: {jf.name}")
+        with open(jf, "r", encoding="utf-8") as fin:
+            raw = fin.read()
 
-            # Math23K 可能是 JSONL、JSON 数组、或多行 JSON 拼接
-            records = _parse_json_variants(raw)
+        # Math23K 可能是 JSONL、JSON 数组、或多行 JSON 拼接
+        records = _parse_json_variants(raw)
 
-            for item in records:
-                if limit is not None and counter >= limit:
-                    break
-
-                counter += 1
-                question = item.get("original_text", "") or item.get("segmented_text", "")
-                answer = item.get("ans", "")
-                equation = item.get("equation", "")
-                item_id = item.get("id", str(counter))
-
-                if not question:
-                    skipped += 1
-                    continue
-
-                record = make_record(
-                    record_id=f"math23k_{int(item_id):06d}",
-                    source="Math23K",
-                    subset=jf.stem,
-                    question=question,
-                    reference_answer=answer,
-                    reference_solution=equation,
-                    answer_type="expr",
-                    metadata={"original_id": item_id},
-                )
-                fout.write(json.dumps(record, ensure_ascii=False) + "\n")
-                success += 1
-
+        for item in records:
             if limit is not None and counter >= limit:
                 break
+
+            counter += 1
+            question = item.get("original_text", "") or item.get("segmented_text", "")
+            answer = item.get("ans", "")
+            equation = item.get("equation", "")
+            item_id = item.get("id", str(counter))
+
+            if not question:
+                skipped += 1
+                continue
+
+            collected.append(make_record(
+                record_id=f"math23k_{int(item_id):06d}",
+                source="Math23K",
+                subset=jf.stem,
+                question=question,
+                reference_answer=answer,
+                reference_solution=equation,
+                answer_type="expr",
+                metadata={"original_id": item_id},
+            ))
+            success += 1
+
+        if limit is not None and counter >= limit:
+            break
+
+    random.shuffle(collected)
+    with open(output_path, "w", encoding="utf-8") as fout:
+        for rec in collected:
+            fout.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
     print(f"  Math23K: 成功 {success}, 跳过 {skipped}")
     return success, skipped
@@ -217,6 +222,7 @@ def process_gaokao_bench(input_dir: Path, output_dir: Path, limit: int | None) -
     success, skipped = 0, 0
     counter = 0
     output_path = output_dir / "gaokao_bench.jsonl"
+    collected = []
 
     # 收集所有数学相关文件
     data_dir = source_dir / "Data"
@@ -231,56 +237,57 @@ def process_gaokao_bench(input_dir: Path, output_dir: Path, limit: int | None) -
 
     print(f"  找到 {len(math_files)} 个数学相关文件")
 
-    with open(output_path, "w", encoding="utf-8") as fout:
-        for mf in math_files:
-            print(f"  处理: {mf.name}")
-            with open(mf, "r", encoding="utf-8") as fin:
-                data = json.load(fin)
+    for mf in math_files:
+        print(f"  处理: {mf.name}")
+        with open(mf, "r", encoding="utf-8") as fin:
+            data = json.load(fin)
 
-            examples = data.get("example", [])
-            subset_name = data.get("keywords", mf.stem)
-            answer_type = _guess_answer_type(mf.name)
+        examples = data.get("example", [])
+        subset_name = data.get("keywords", mf.stem)
+        answer_type = _guess_answer_type(mf.name)
 
-            for item in examples:
-                if limit is not None and counter >= limit:
-                    break
-
-                counter += 1
-                question = item.get("question", "")
-                answer = item.get("answer", "")
-                analysis = item.get("analysis", "")
-                year = item.get("year", "")
-                score = item.get("score", "")
-                idx = item.get("index", counter)
-
-                if not question:
-                    skipped += 1
-                    continue
-
-                ref_answer = _normalize_answer(answer)
-                # 对于选择题，答案可能是 A/B/C/D
-                # 对于填空/解答题，答案可能是 LaTeX
-
-                record = make_record(
-                    record_id=f"gaokao_{counter:06d}",
-                    source="GAOKAO-Bench",
-                    subset=subset_name,
-                    question=question,
-                    reference_answer=ref_answer,
-                    reference_solution=analysis,
-                    answer_type=answer_type,
-                    metadata={
-                        "year": year,
-                        "category": item.get("category", ""),
-                        "score": score,
-                        "index": idx,
-                    },
-                )
-                fout.write(json.dumps(record, ensure_ascii=False) + "\n")
-                success += 1
-
+        for item in examples:
             if limit is not None and counter >= limit:
                 break
+
+            counter += 1
+            question = item.get("question", "")
+            answer = item.get("answer", "")
+            analysis = item.get("analysis", "")
+            year = item.get("year", "")
+            score = item.get("score", "")
+            idx = item.get("index", counter)
+
+            if not question:
+                skipped += 1
+                continue
+
+            ref_answer = _normalize_answer(answer)
+
+            collected.append(make_record(
+                record_id=f"gaokao_{counter:06d}",
+                source="GAOKAO-Bench",
+                subset=subset_name,
+                question=question,
+                reference_answer=ref_answer,
+                reference_solution=analysis,
+                answer_type=answer_type,
+                metadata={
+                    "year": year,
+                    "category": item.get("category", ""),
+                    "score": score,
+                    "index": idx,
+                },
+            ))
+            success += 1
+
+        if limit is not None and counter >= limit:
+            break
+
+    random.shuffle(collected)
+    with open(output_path, "w", encoding="utf-8") as fout:
+        for rec in collected:
+            fout.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
     print(f"  GAOKAO-Bench: 成功 {success}, 跳过 {skipped}")
     return success, skipped
@@ -299,67 +306,71 @@ def process_linkwise_cot(input_dir: Path, output_dir: Path, limit: int | None) -
     success, skipped = 0, 0
     counter = 0
     output_path = output_dir / "linkwise_cot.jsonl"
+    collected = []
 
     json_files = sorted(source_dir.glob("*.json"))
     # 排除非数据文件
     data_files = [f for f in json_files if "介绍" not in f.name and f.stat().st_size > 1000]
 
-    with open(output_path, "w", encoding="utf-8") as fout:
-        for jf in data_files:
-            print(f"  处理: {jf.name}")
-            with open(jf, "r", encoding="utf-8") as fin:
-                data = json.load(fin)
+    for jf in data_files:
+        print(f"  处理: {jf.name}")
+        with open(jf, "r", encoding="utf-8") as fin:
+            data = json.load(fin)
 
-            if not isinstance(data, list):
-                data = [data]
+        if not isinstance(data, list):
+            data = [data]
 
-            for item in data:
-                if limit is not None and counter >= limit:
-                    break
-
-                counter += 1
-                question = item.get("question_stem", "")
-                answer = item.get("answer", "")
-                solution = item.get("solution", "")
-                reasoning = item.get("reasoning", "")
-                job_id = item.get("job_id", counter)
-                q_type = item.get("question_type", "")
-                difficulty = item.get("difficulty", "")
-
-                if not question:
-                    skipped += 1
-                    continue
-
-                # 判断答案类型
-                if "选择" in q_type:
-                    answer_type = "choice"
-                else:
-                    answer_type = "expr"
-
-                # reference_solution 优先用 reasoning（更完整）
-                ref_solution = reasoning or solution
-
-                record = make_record(
-                    record_id=f"linkwise_{counter:06d}",
-                    source="LinkWiseCoTDataset",
-                    subset=jf.stem,
-                    question=question,
-                    reference_answer=answer,
-                    reference_solution=ref_solution,
-                    answer_type=answer_type,
-                    difficulty=difficulty,
-                    metadata={
-                        "job_id": job_id,
-                        "question_type": q_type,
-                        "knowledge_points": item.get("knowledge_points", ""),
-                        "volume_name": item.get("volume_name", ""),
-                    },
-                )
-                fout.write(json.dumps(record, ensure_ascii=False) + "\n")
-                success += 1
-
+        for item in data:
             if limit is not None and counter >= limit:
                 break
+
+            counter += 1
+            question = item.get("question_stem", "")
+            answer = item.get("answer", "")
+            solution = item.get("solution", "")
+            reasoning = item.get("reasoning", "")
+            job_id = item.get("job_id", counter)
+            q_type = item.get("question_type", "")
+            difficulty = item.get("difficulty", "")
+
+            if not question:
+                skipped += 1
+                continue
+
+            # 判断答案类型
+            if "选择" in q_type:
+                answer_type = "choice"
+            else:
+                answer_type = "expr"
+
+            # reference_solution 优先用 reasoning（更完整）
+            ref_solution = reasoning or solution
+
+            collected.append(make_record(
+                record_id=f"linkwise_{counter:06d}",
+                source="LinkWiseCoTDataset",
+                subset=jf.stem,
+                question=question,
+                reference_answer=answer,
+                reference_solution=ref_solution,
+                answer_type=answer_type,
+                difficulty=difficulty,
+                metadata={
+                    "job_id": job_id,
+                    "question_type": q_type,
+                    "knowledge_points": item.get("knowledge_points", ""),
+                    "volume_name": item.get("volume_name", ""),
+                },
+            ))
+            success += 1
+
+        if limit is not None and counter >= limit:
+            break
+
+    random.shuffle(collected)
+    with open(output_path, "w", encoding="utf-8") as fout:
+        for rec in collected:
+            fout.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
     print(f"  LinkWiseCoTDataset: 成功 {success}, 跳过 {skipped}")
     return success, skipped
@@ -369,45 +380,122 @@ def process_linkwise_cot(input_dir: Path, output_dir: Path, limit: int | None) -
 
 
 def merge_all(output_dir: Path) -> int:
-    """合并所有 JSONL 到 train_or_eval_all.jsonl。返回总行数。"""
+    """合并所有 JSONL 到 train_or_eval_all.jsonl，打乱顺序。返回总行数。"""
     all_path = output_dir / "train_or_eval_all.jsonl"
     jsonl_files = sorted(output_dir.glob("*.jsonl"))
     # 排除合并文件本身
     jsonl_files = [f for f in jsonl_files if f.name != "train_or_eval_all.jsonl"]
 
-    total = 0
-    with open(all_path, "w", encoding="utf-8") as fout:
-        for jf in jsonl_files:
-            with open(jf, "r", encoding="utf-8") as fin:
-                for line in fin:
-                    line = line.strip()
-                    if line:
-                        fout.write(line + "\n")
-                        total += 1
+    lines = []
+    for jf in jsonl_files:
+        with open(jf, "r", encoding="utf-8") as fin:
+            for line in fin:
+                line = line.strip()
+                if line:
+                    lines.append(line)
 
-    print(f"\n合并完成: train_or_eval_all.jsonl 共 {total} 条")
-    return total
+    random.shuffle(lines)
+
+    with open(all_path, "w", encoding="utf-8") as fout:
+        for line in lines:
+            fout.write(line + "\n")
+
+    print(f"\n合并完成（已打乱）: train_or_eval_all.jsonl 共 {len(lines)} 条")
+    return len(lines)
 
 
 def write_summary(output_dir: Path, stats: dict[str, tuple[int, int]]):
-    """写统计报告。"""
+    """写统计报告，包含题型分布、来源分布、年份分布。"""
     summary_path = output_dir / "dataset_summary.md"
+    from collections import Counter
 
     total_success = sum(s for s, _ in stats.values())
     total_skipped = sum(sk for _, sk in stats.values())
 
     lines = [
         "# 数据集标准化统计报告\n",
-        f"| 数据集 | 成功数 | 跳过数 |",
-        f"|--------|--------|--------|",
+        "## 总览\n",
+        "| 数据集 | 题目数 | 跳过数 |",
+        "|--------|--------|--------|",
     ]
     for name, (s, sk) in stats.items():
         lines.append(f"| {name} | {s} | {sk} |")
     lines.append(f"| **合计** | **{total_success}** | **{total_skipped}** |")
     lines.append("")
-    lines.append(f"总有效样本: {total_success}")
-    lines.append(f"总跳过样本: {total_skipped}")
-    lines.append("")
+
+    # 每个数据集的详细统计
+    dataset_files = {
+        "Math23K": "math23k.jsonl",
+        "GAOKAO-Bench": "gaokao_bench.jsonl",
+        "LinkWiseCoTDataset": "linkwise_cot.jsonl",
+    }
+
+    for ds_name, fname in dataset_files.items():
+        ds_path = output_dir / fname
+        if not ds_path.exists():
+            continue
+
+        records = []
+        with open(ds_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    records.append(json.loads(line))
+
+        n = len(records)
+        lines.append("---\n")
+        lines.append(f"## {ds_name}（{n} 题）\n")
+
+        # 题型分布
+        type_counts = Counter(r.get("answer_type", "?") for r in records)
+        type_label = {"choice": "选择题", "expr": "填空/解答题"}
+        lines.append("### 题型分布\n")
+        lines.append("| 题型 | 数量 | 占比 |")
+        lines.append("|------|------|------|")
+        for t, c in type_counts.most_common():
+            label = type_label.get(t, t)
+            lines.append(f"| {label} ({t}) | {c} | {c/n*100:.1f}% |")
+        lines.append("")
+
+        # 来源/子集分布
+        subset_counts = Counter(r.get("subset", "") for r in records)
+        if subset_counts:
+            lines.append("### 来源分布\n")
+            lines.append("| 子集 | 数量 | 占比 |")
+            lines.append("|------|------|------|")
+            for s, c in subset_counts.most_common():
+                lines.append(f"| {s} | {c} | {c/n*100:.1f}% |")
+            lines.append("")
+
+        # 年份分布（仅 GAOKAO-Bench 有年份）
+        year_counts = Counter(
+            r.get("metadata", {}).get("year", "")
+            for r in records
+            if r.get("metadata", {}).get("year", "")
+        )
+        if year_counts:
+            lines.append("### 年份分布\n")
+            lines.append("| 年份 | 数量 | 占比 |")
+            lines.append("|------|------|------|")
+            for y, c in sorted(year_counts.items()):
+                lines.append(f"| {y} | {c} | {c/n*100:.1f}% |")
+            lines.append("")
+
+        # 难度分布（仅 LinkWise 有难度）
+        diff_counts = Counter(r.get("difficulty", "") for r in records)
+        diff_counts = {k: v for k, v in diff_counts.items() if k}
+        if diff_counts:
+            lines.append("### 难度分布\n")
+            lines.append("| 难度 | 数量 | 占比 |")
+            lines.append("|------|------|------|")
+            for d, c in sorted(diff_counts.items(), key=lambda x: -x[1]):
+                lines.append(f"| {d} | {c} | {c/n*100:.1f}% |")
+            lines.append("")
+
+        # 含图片
+        img_count = sum(1 for r in records if r.get("has_image"))
+        lines.append(f"- **含图片**: {img_count}")
+        lines.append("")
 
     with open(summary_path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines))
