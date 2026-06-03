@@ -58,7 +58,7 @@ echo ""
 
 # 排除项列表
 EXCLUDES=(
-    
+    results/*
     "results/prm"
     # model_outputs模型
     "data/model_outputs/"
