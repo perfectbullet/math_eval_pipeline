@@ -22,7 +22,7 @@ from tqdm import tqdm
 
 # 数学解题系统提示
 # 这个是官方推荐的提示词
-MATH_SYSTEM_PROMPT = """请逐步推理，并将您的最终答案放在\boxed{}内。"""
+MATH_SYSTEM_PROMPT = """请逐步推理，并将您的最终答案放在\\boxed{}内。"""
 
 
 def call_ollama(

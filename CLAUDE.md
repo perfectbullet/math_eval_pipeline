@@ -97,4 +97,4 @@ results/reports/error_attribution_report.md + error_cases.jsonl
 
 **归因逻辑**（`build_error_report.py`）：`verify_correct=true → pass`；`extracted_prediction 为空 → answer_extract_error`；有 PRM 结果时按 `min_step_score < 0.45 → logic_error`，`avg_score >= 0.70 → answer_or_render_suspect`；无 PRM → `uncertain`。
 
-**推理脚本**（`run_model_inference.py`）：调用 Ollama 的 OpenAI 兼容 API，通过 `MATH_SYSTEM_PROMPT` 要求模型输出 `\boxed{}` 格式答案。支持 `--skip_existing` 断点续跑。
+**推理脚本**（`run_model_inference.py`）：调用 Ollama 的 OpenAI 兼容 API，通过 `MATH_SYSTEM_PROMPT` 要求模型输出 `\\boxed{}` 格式答案。支持 `--skip_existing` 断点续跑。

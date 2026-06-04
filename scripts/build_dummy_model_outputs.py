@@ -25,7 +25,7 @@ def build_dummy_output(record: dict, model_name: str = "dummy") -> dict:
         model_output = f"解题过程：\n经过分析，本题答案为 {ref_answer}\n最终答案：{ref_answer}"
         final_answer_raw = ref_answer
     else:
-        # 对于表达式/填空题，把答案放进 \boxed{}
+        # 对于表达式/填空题，把答案放进 \\boxed{}
         # 如果答案已经是 LaTeX 格式，直接用
         if ref_answer.startswith("$") and ref_answer.endswith("$"):
             boxed = f"\\boxed{{{ref_answer[1:-1]}}}"

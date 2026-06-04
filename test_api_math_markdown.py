@@ -2,9 +2,11 @@
 
 from math_llm_client import MathLLMClient
 
-model_name = "Qwen3-32B-GPTQ-Int8"
+# model_name = "Qwen3-32B-GPTQ-Int8"
+# base_url = "http://192.168.100.202:8000/v1"
+model_name = "Qwen3-32B"
 base_url = "http://192.168.100.202:8000/v1"
-max_tokens = int(20480 * 0.9)
+max_tokens = int(10240 * 0.9)
 
 q = r"""# 化简下列各式：
 

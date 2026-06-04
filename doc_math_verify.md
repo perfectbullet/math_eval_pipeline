@@ -76,7 +76,7 @@ is_correct = verify(gold_parsed, pred_parsed)
 ```
 
 这样做的优势是：
-- 不需要自己写正则去从模型输出里抠答案，math-verify 能自动识别 `\boxed{}`、`$$...$$`、`\(...\)` 等各种 LaTeX 环境
+- 不需要自己写正则去从模型输出里抠答案，math-verify 能自动识别 `\\boxed{}`、`$$...$$`、`\(...\)` 等各种 LaTeX 环境
 - 选择题通过 `StringExtractionConfig` 直接抽取选项字母，准确率更高
 
 **第二级：手工降级**（math-verify 失败时）
@@ -84,7 +84,7 @@ is_correct = verify(gold_parsed, pred_parsed)
 当 math-verify 无法解析（如含变量的表达式 `x^2+1`）或抛异常时，自动降级：
 
 ```
-1. 手工正则抽取答案（\boxed{}、<final_answer>、中文关键词）
+1. 手工正则抽取答案（\\boxed{}、<final_answer>、中文关键词）
 2. 数值比较（容差 1e-3）
 3. 字符串比较（去空格/符号后匹配）
 ```
