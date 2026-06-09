@@ -11,11 +11,12 @@
     # 限制处理数量
     python extract_mineru_sdk.py --input_dir /path/to/files --limit 10
 
-    # 指定模型版本
-    python extract_mineru_sdk.py --input_dir /path/to/files --model_version vlm
+    # 指定输出结果路径
+    python extract_mineru_sdk.py --input_dir /mnt/d/数字人数学场景测试/数字人数学场景测试-只有对qwen3-32b的测试题目图片 --output_dir /mnt/d/数字人数学场景 测试/数字人数学场景测试-只有对qwen3-32b的测试题目图片/
 """
 
 import argparse
+import hashlib
 import json
 import logging
 import os
@@ -39,6 +40,17 @@ SUPPORTED_EXTENSIONS = {
     ".png", ".jpg", ".jpeg", ".jp2", ".webp", ".gif", ".bmp",
     ".pdf", ".doc", ".docx", ".ppt", ".pptx", ".xls", ".xlsx",
 }
+
+_MD5_CHUNK_SIZE = 8192
+
+
+def compute_file_md5(path: Path) -> str:
+    """计算文件内容的 MD5 哈希值。"""
+    h = hashlib.md5()
+    with open(path, "rb") as f:
+        while chunk := f.read(_MD5_CHUNK_SIZE):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 class MinerUClient:
@@ -193,10 +205,10 @@ def download_and_extract_markdown(zip_url: str, max_retries: int = 3) -> str | N
 
 
 def load_existing_output(output_path: Path) -> set[str]:
-    """读取已有输出文件，返回已处理的 data_id 集合。"""
+    """读取已有输出文件，返回已处理文件的 MD5 集合（按内容去重）。"""
     if not output_path.exists():
         return set()
-    done = set()
+    md5_set = set()
     with open(output_path, "r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
@@ -204,11 +216,11 @@ def load_existing_output(output_path: Path) -> set[str]:
                 continue
             try:
                 rec = json.loads(line)
-                if rec.get("data_id"):
-                    done.add(rec["data_id"])
+                if rec.get("file_md5"):
+                    md5_set.add(rec["file_md5"])
             except json.JSONDecodeError:
                 pass
-    return done
+    return md5_set
 
 
 def parse_args():
@@ -260,14 +272,17 @@ def main():
     )
     logger.info("扫描到 %d 个文件", len(all_files))
 
-    # 跳过已处理
+    # 跳过已处理（按文件内容 MD5 去重）
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / "results.jsonl"
     if args.skip_existing:
-        existing = load_existing_output(output_path)
-        all_files = [f for f in all_files if f.stem not in existing]
-        logger.info("跳过已处理，剩余 %d 个", len(all_files))
+        existing_md5 = load_existing_output(output_path)
+        file_md5_map = {f: compute_file_md5(f) for f in all_files}
+        all_files = [f for f in all_files if file_md5_map[f] not in existing_md5]
+        logger.info("跳过已处理（MD5 去重），剩余 %d 个", len(all_files))
+    else:
+        file_md5_map = {f: compute_file_md5(f) for f in all_files}
 
     # 限制数量
     if args.limit:
@@ -321,8 +336,16 @@ def main():
                         state = "download_failed"
 
                 record = {
+                    # 推理脚本兼容字段
+                    "id": file_md5_map[f],
+                    "question": markdown_content or "",
+                    "source": input_dir.name,
+                    "answer_type": "expr",
+                    "reference_answer": "",
+                    # MinerU 原有字段
+                    "file_path": str(f),
                     "file_name": f.name,
-                    "data_id": did,
+                    "file_md5": file_md5_map[f],
                     "state": state,
                     "markdown_content": markdown_content,
                     "zip_url": zip_url,

@@ -16,7 +16,7 @@ from pathlib import Path
 from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.responses import JSONResponse
 
-from extract_mineru_sdk import MinerUClient, download_and_extract_markdown
+from extract_mineru_sdk import MinerUClient, compute_file_md5, download_and_extract_markdown
 
 logger = logging.getLogger(__name__)
 
@@ -73,9 +73,19 @@ async def extract(
             logger.warning("下载/解压失败: %s", e)
             state = "download_failed"
 
+    file_md5 = compute_file_md5(dest)
+
     record = {
+        # 推理脚本兼容字段
+        "id": file_md5,
+        "question": markdown_content or "",
+        "source": "MinerU",
+        "answer_type": "expr",
+        "reference_answer": "",
+        # MinerU 原有字段
+        "file_path": str(dest),
         "file_name": dest.name,
-        "data_id": dest.stem,
+        "file_md5": file_md5,
         "state": state,
         "markdown_content": markdown_content,
         "zip_url": zip_url,

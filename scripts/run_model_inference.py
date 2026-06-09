@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-模型推理脚本：将标准化数据集发送给 Ollama 数学模型，收集推理结果。
+模型推理脚本：将标准化数据集发送给 vLLM 数学模型，收集推理结果。
 
 用法:
     python run_model_inference.py \
         --input ../data/standardized/train_or_eval_all.jsonl \
         --output ../data/model_outputs/model_outputs.jsonl \
-        --api_base http://192.168.8.231:11434/v1 \
-        --model qwen2.5-math-Q6_K_L:7b \
+        --api_base http://192.168.8.231:8000/v1 \
+        --model Qwen3-32B-GPTQ-Int8 \
         --limit 100
 """
 
@@ -16,7 +16,7 @@ import json
 import time
 from pathlib import Path
 
-import requests
+from openai import OpenAI, APIConnectionError, APITimeoutError
 from tqdm import tqdm
 
 
@@ -25,53 +25,56 @@ from tqdm import tqdm
 MATH_SYSTEM_PROMPT = """请逐步推理，并将您的最终答案放在\\boxed{}内。"""
 
 
-def call_ollama(
+def call_vllm(
     question: str,
-    api_base: str,
+    client: OpenAI,
     model: str,
     max_tokens: int = 2048,
-    temperature: float = 0.1,
     timeout: int = 120,
 ) -> tuple[str, dict]:
     """
-    调用 Ollama OpenAI 兼容 API。
+    调用 vLLM OpenAI 兼容 API。
     返回: (模型输出文本, 元数据)
     """
-    url = f"{api_base}/chat/completions"
-    payload = {
-        "model": model,
-        "messages": [
-            {"role": "system", "content": MATH_SYSTEM_PROMPT},
-            {"role": "user", "content": question},
-        ],
-        "max_tokens": max_tokens,
-        "temperature": temperature,
-    }
-
     meta = {}
     start_time = time.time()
 
-    try:
-        resp = requests.post(url, json=payload, timeout=timeout)
-        resp.raise_for_status()
-        data = resp.json()
+    extra_body = {
+        # enable thinking, set to False to disable test
+        "enable_thinking": True,
+        # use thinking_budget to contorl num of tokens used for thinking
+        # "thinking_budget": 4096
+    }
 
-        content = data["choices"][0]["message"]["content"]
-        usage = data.get("usage", {})
+    try:
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": MATH_SYSTEM_PROMPT},
+                {"role": "user", "content": question},
+            ],
+            max_tokens=max_tokens,
+            # temperature=temperature,
+            timeout=timeout,
+            extra_body=extra_body
+        )
+
+        content = resp.choices[0].message.content or ""
+        usage = resp.usage
 
         meta["latency_seconds"] = round(time.time() - start_time, 2)
-        meta["prompt_tokens"] = usage.get("prompt_tokens", 0)
-        meta["completion_tokens"] = usage.get("completion_tokens", 0)
-        meta["total_tokens"] = usage.get("total_tokens", 0)
-        meta["finish_reason"] = data["choices"][0].get("finish_reason", "")
+        meta["prompt_tokens"] = usage.prompt_tokens if usage else 0
+        meta["completion_tokens"] = usage.completion_tokens if usage else 0
+        meta["total_tokens"] = usage.total_tokens if usage else 0
+        meta["finish_reason"] = resp.choices[0].finish_reason or ""
 
         return content, meta
 
-    except requests.exceptions.Timeout:
+    except APITimeoutError:
         meta["error"] = "timeout"
         meta["latency_seconds"] = round(time.time() - start_time, 2)
         return "", meta
-    except requests.exceptions.ConnectionError:
+    except APIConnectionError:
         meta["error"] = "connection_error"
         return "", meta
     except Exception as e:
@@ -81,16 +84,25 @@ def call_ollama(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="调用 Ollama 模型做数学推理")
+    parser = argparse.ArgumentParser(description="调用 vLLM 模型做数学推理")
     parser.add_argument("--input", required=True, help="标准化数据集 JSONL")
     parser.add_argument("--output", required=True, help="模型输出 JSONL")
-    parser.add_argument("--api_base", default="http://192.168.8.231:11434/v1", help="Ollama API 地址")
-    parser.add_argument("--model", default="qwen2.5-math-Q6_K_L:7b", help="模型名称")
+    parser.add_argument(
+        "--api_base", default="http://192.168.8.231:8000/v1", help="vLLM API 地址"
+    )
+    parser.add_argument(
+        "--api_key", default="EMPTY", help="API Key（vLLM 本地部署可忽略）"
+    )
+    parser.add_argument("--model", default="Qwen3-32B-GPTQ-Int8", help="模型名称")
     parser.add_argument("--limit", type=int, default=None, help="最多推理 N 条")
-    parser.add_argument("--max_tokens", type=int, default=2048, help="最大生成 token 数")
-    parser.add_argument("--temperature", type=float, default=0.1, help="采样温度")
+    parser.add_argument(
+        "--max_tokens", type=int, default=2048, help="最大生成 token 数"
+    )
+    # parser.add_argument("--temperature", type=float, default=0.1, help="采样温度")
     parser.add_argument("--timeout", type=int, default=120, help="单条超时（秒）")
-    parser.add_argument("--skip_existing", action="store_true", help="跳过已有结果（断点续跑）")
+    parser.add_argument(
+        "--skip_existing", action="store_true", help="跳过已有结果（断点续跑）"
+    )
     args = parser.parse_args()
 
     input_path = Path(args.input).expanduser()
@@ -137,7 +149,7 @@ def main():
 
     total = len(records)
     if args.limit:
-        records = records[:args.limit]
+        records = records[: args.limit]
         total = len(records)
         print(f"限制处理 {total} 条")
 
@@ -149,10 +161,12 @@ def main():
     print(f"输出: {output_path}")
     print("=" * 60)
 
-    # 先测试连接
+    # 创建 OpenAI 客户端
+    client = OpenAI(base_url=args.api_base, api_key=args.api_key)
+
+    # 测试连接
     try:
-        resp = requests.get(f"{args.api_base}/models", timeout=10)
-        resp.raise_for_status()
+        client.models.list()
         print("API 连接正常")
     except Exception as e:
         print(f"[ERROR] 无法连接到 {args.api_base}: {e}")
@@ -175,12 +189,12 @@ def main():
             question = record["question"]
             answer_type = record.get("answer_type", "expr")
 
-            model_output, meta = call_ollama(
+            model_output, meta = call_vllm(
                 question=question,
-                api_base=args.api_base,
+                client=client,
                 model=args.model,
                 max_tokens=args.max_tokens,
-                temperature=args.temperature,
+                # temperature=args.temperature,
                 timeout=args.timeout,
             )
 

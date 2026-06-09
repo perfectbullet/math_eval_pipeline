@@ -15,37 +15,7 @@ logs/
 
 # External git repos (use submodule if needed)
 external/Math-Verify/
-data/standardized-demo/dataset_summary.md
-data/standardized-demo/gaokao_bench.jsonl
-data/standardized-demo/linkwise_cot.jsonl
-data/standardized-demo/math23k.jsonl
-data/standardized-demo/train_or_eval_all.jsonl
-output/markdown/20260529_133655.md
-output/markdown/20260529_134340.md
-output/markdown/20260530_144537.md
-output/markdown/20260530_151029.md
-output/markdown/20260530_151654.md
-output/markdown/20260530_152652.md
-output/markdown/20260530_153455.md
-output/markdown/20260530_154946_delta_debug.json
-output/markdown/20260530_154946.md
-output/markdown/20260530_155656_delta_debug.json
-output/markdown/20260530_155656.md
-output/markdown/20260530_155945_delta_debug.json
-output/markdown/20260530_155945.md
-output/markdown/20260530_161242_delta_debug.json
-output/markdown/20260530_161242.md
-output/markdown/20260530_161810_delta_debug.json
-output/markdown/20260530_161810.md
-output/markdown/20260530_164636.json
-output/markdown/20260530_164636.md
-output/markdown/20260530_171605.json
-output/markdown/20260530_171605.md
-output/markdown/20260530_173800.json
-output/markdown/20260530_173800.md
-output/markdown/20260530_175549.json
-output/markdown/20260530_175549.md
-output/markdown/delta_debug.json
+data/standardized-demo/*
 output/markdown/*
 data/standardized-demo/*
 data/model_outputs/*
@@ -55,3 +25,6 @@ models/Qwen2.5-Math-PRM-7B/.msc
 high_school_math_problems.json
 math_eval_pipeline_execution_plan.md
 reports-233
+data/standardized/*
+mineru_deal/output/*
+data/standardized/*
