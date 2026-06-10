@@ -7,8 +7,8 @@ PRM 评分数据查询 API。
     # 默认加载 results/prm/ 下第一个 *-gaokao-*.jsonl 文件
     python scripts/serve_prm_scores.py
 
-    # 指定文件
-    python scripts/serve_prm_scores.py --file results/prm/prm_step_scores-gaokao-Qwen3-32B-GPTQ-Int8-0602.jsonl
+    # 指定文件（支持多个，用空格分隔）
+    python scripts/serve_prm_scores.py --file results/prm/a.jsonl results/prm/b.jsonl
 
     # 指定端口（默认 8900）
     python scripts/serve_prm_scores.py --port 8901
@@ -118,20 +118,24 @@ def _fix_boxed_wrapping(text: str) -> str:
 
 # 全局数据存储 {id: record}
 _data: dict[str, dict] = {}
+_data_files: list[Path] = []
 
 
 @asynccontextmanager
 async def lifespan(application: FastAPI):
     """启动时加载数据。"""
-    global _data
-    file_path = application.state.file_path
-    if file_path is None:
-        file_path = _find_default_file()
-        if file_path is None:
+    global _data, _data_files
+    file_paths = application.state.file_paths
+    if not file_paths:
+        default = _find_default_file()
+        if default is None:
             print("错误：未找到 PRM 评分文件，请用 --file 指定", file=sys.stderr)
             sys.exit(1)
-    print(f"加载数据: {file_path}")
-    _data = load_jsonl(file_path)
+        file_paths = [default]
+    for p in file_paths:
+        print(f"加载数据: {p}")
+    _data_files = file_paths
+    _data = load_jsonl_multi(file_paths)
     print(f"共 {len(_data)} 条记录")
     yield
 
@@ -140,7 +144,7 @@ app = FastAPI(title="PRM Scores API", version="1.0.0", lifespan=lifespan)
 
 
 def load_jsonl(path: Path) -> dict[str, dict]:
-    """加载 JSONL 文件，返回 {id: record} 字典。自动修复行内公式空格。"""
+    """加载单个 JSONL 文件，返回 {id: record} 字典。自动修复公式渲染。"""
     result = {}
     with open(path, "r", encoding="utf-8") as f:
         for line in f:
@@ -152,6 +156,14 @@ def load_jsonl(path: Path) -> dict[str, dict]:
             if rid:
                 _fix_record_math(record)
                 result[rid] = record
+    return result
+
+
+def load_jsonl_multi(paths: list[Path]) -> dict[str, dict]:
+    """加载多个 JSONL 文件，合并为 {id: record} 字典（后加载的覆盖先加载的）。"""
+    result: dict[str, dict] = {}
+    for path in paths:
+        result.update(load_jsonl(path))
     return result
 
 
@@ -190,7 +202,10 @@ def health():
 
 @app.get("/ids")
 def list_ids():
-    """返回所有 id 列表。"""
+    """重新加载数据并返回所有 id 列表。"""
+    global _data
+    if _data_files:
+        _data = load_jsonl_multi(_data_files)
     return list(_data.keys())
 
 
@@ -214,13 +229,13 @@ def get_first():
 
 def main():
     parser = argparse.ArgumentParser(description="PRM 评分数据查询 API")
-    parser.add_argument("--file", type=str, default=None, help="JSONL 文件路径")
+    parser.add_argument("--file", type=str, nargs="+", default=None, help="JSONL 文件路径（支持多个）")
     parser.add_argument("--host", type=str, default="0.0.0.0", help="监听地址")
     parser.add_argument("--port", type=int, default=8900, help="监听端口")
     args = parser.parse_args()
 
-    file_path = Path(args.file) if args.file else None
-    app.state.file_path = file_path
+    file_paths = [Path(f) for f in args.file] if args.file else []
+    app.state.file_paths = file_paths
 
     uvicorn.run(app, host=args.host, port=args.port)
 

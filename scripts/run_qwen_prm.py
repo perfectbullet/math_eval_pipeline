@@ -660,13 +660,18 @@ def _safe_markdown(text: str) -> str:
 
     protected = _MATH_BLOCK_RE.sub(_replace, text)
 
+    # 防止行首的 "数字.空格" 被 Markdown 解析为有序列表
+    # 例如 "0. 98." → "0\. 98."，渲染结果不变但不会被吞掉
+    protected = re.sub(r"(^|\n)(\d+)\. ", r"\1\2\\. ", protected)
+
     # markdown 处理（此时文本中没有 $...$ 数学块了）
     result = markdown.markdown(protected, extensions=["fenced_code", "tables"])
 
-    # 恢复数学块（markdown 可能会在占位符前后加 <p> 等标签，需要处理）
+    # 恢复数学块，HTML 转义防止 < > & 被浏览器解析为 HTML 标签
     for idx, block in enumerate(math_blocks):
         placeholder = f"%%MATH{idx}%%"
-        result = result.replace(placeholder, block)
+        escaped_block = block.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        result = result.replace(placeholder, escaped_block)
 
     return result
 
@@ -765,8 +770,8 @@ def _write_error_html(results: list[dict], output_dir: Path):
         buf += f'  <div class="section-title">题目</div>\n'
         buf += f'  <div class="section-content">{q_html}</div>\n</div>\n'
 
-        # 标准答案
-        a_html = _safe_markdown(r.get("reference_answer", ""))
+        # 标准答案（纯文本，KaTeX 浏览器端渲染 $...$）
+        a_html = html.escape(r.get("reference_answer", ""))
         buf += '<div class="section">\n'
         buf += '  <div class="section-title">标准答案</div>\n'
         buf += f'  <div class="section-content">{a_html}</div>\n</div>\n'
