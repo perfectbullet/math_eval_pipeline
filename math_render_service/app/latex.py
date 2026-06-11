@@ -308,3 +308,99 @@ def normalize_latex_formulas(text: str) -> str:
     text = wrap_bare_boxed(text)
     text = re.sub(r'\\text\b', r'\\mathrm', text)
     return text
+
+
+# ── 来自 scripts/serve_prm_scores.py 的修复函数（正则版）───────────────────
+
+_DISPLAY_MATH_RE = re.compile(r"\$\$.*?\$\$", re.DOTALL)
+_INLINE_MATH_RE = re.compile(r"\$([^$]+?)\$")
+
+
+def _fix_inline_math(text: str) -> str:
+    """修复行内公式空格：$ xxx $ → $xxx$（不影响 $$...$$ 块级公式）。"""
+    if not text or "$" not in text:
+        return text
+
+    # 1. 保护 $$...$$ 块级公式
+    placeholders: list[str] = []
+
+    def _save(m):
+        placeholders.append(m.group(0))
+        return f"%%MATH{len(placeholders) - 1}%%"
+
+    protected = _DISPLAY_MATH_RE.sub(_save, text)
+
+    # 2. 修复行内公式：去掉 $ 紧内侧的首尾空格
+    def _trim(m):
+        inner = m.group(1)
+        stripped = inner.strip()
+        return f"${stripped}$" if stripped != inner else m.group(0)
+
+    fixed = _INLINE_MATH_RE.sub(_trim, protected)
+
+    # 3. 恢复块级公式
+    for idx, block in enumerate(placeholders):
+        fixed = fixed.replace(f"%%MATH{idx}%%", block)
+
+    return fixed
+
+
+_THINK_TAG_RE = re.compile(r"<think[^>]*>.*?</think\s*>", re.DOTALL)
+
+
+def _strip_think_tags(text: str) -> str:
+    """去掉 <think...>...</think > 包裹的思考过程文本。"""
+    if not text or "<think" not in text:
+        return text
+    return _THINK_TAG_RE.sub("", text).strip()
+
+
+_BOXED_RE = re.compile(r"(?<!\$)(\\boxed\{(?:[^{}]|\{(?:[^{}]|\{[^{}]*\})*\})*\})")
+
+
+def _fix_boxed_wrapping(text: str) -> str:
+    """为未被 $ 包裹的 \boxed{...} 补上 $...$（跳过已在 $$...$$ 内的）。"""
+    if not text or "\\boxed{" not in text:
+        return text
+
+    # 1. 保护 $$...$$ 块级公式，避免误包内部 \boxed
+    placeholders: list[str] = []
+
+    def _save(m):
+        placeholders.append(m.group(0))
+        return f"%%DMATH{len(placeholders) - 1}%%"
+
+    protected = _DISPLAY_MATH_RE.sub(_save, text)
+
+    # 2. 对裸露的 \boxed{...} 补 $...$
+    def _wrap(m):
+        return f"${m.group(1)}$"
+
+    fixed = _BOXED_RE.sub(_wrap, protected)
+
+    # 3. 恢复块级公式
+    for idx, block in enumerate(placeholders):
+        fixed = fixed.replace(f"%%DMATH{idx}%%", block)
+
+    return fixed
+
+
+# 需要修复的文本字段
+_TEXT_FIELDS = ("question", "model_output", "reference_answer")
+
+
+def fix_record_math(record: dict):
+    """对 record 中的文本字段和 steps[].text 修复公式渲染问题。
+
+    依次执行：去 think 标签 → 裸 boxed 包裹 → 行内公式空格。
+    """
+    for key in _TEXT_FIELDS:
+        if key in record and isinstance(record[key], str):
+            record[key] = _strip_think_tags(record[key])
+            record[key] = _fix_boxed_wrapping(record[key])
+            record[key] = _fix_inline_math(record[key])
+    for step in record.get("steps", []):
+        if isinstance(step, dict) and "text" in step and isinstance(step["text"], str):
+            step["text"] = _strip_think_tags(step["text"])
+            step["text"] = _fix_boxed_wrapping(step["text"])
+            step["text"] = _fix_inline_math(step["text"])

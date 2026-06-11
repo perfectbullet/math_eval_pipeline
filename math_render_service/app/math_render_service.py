@@ -1,20 +1,17 @@
 """
-PRM 评分数据查询 API。
+PRM 评分数据查询 API — 带流式处理管线。
 
-按 id 字段查询 prm_step_scores JSONL 文件中的记录。
+处理流程：加载原始数据 → 按需对 model_output 执行
+  去思考标签(ThinkTagBuffer) → 断句(SentenceBuffer) → LaTeX修复(normalize_latex_formulas)
+→ 保存中间结果 → 返回处理后的数据。
 
 用法:
-    # 默认加载 results/prm/ 下第一个 *-gaokao-*.jsonl 文件
-    python app/math_render_service.py
-
-    # 指定文件（支持多个，用空格分隔）
-    python app/math_render_service.py --file results/prm/a.jsonl results/prm/b.jsonl
-
-    # 指定端口（默认 8900）
-    python app/math_render_service.py --port 8901
+    python app/math_render_service.py \
+      --file ../results/prm/prm_step_scores-gaokao-Qwen3-32B-GPTQ-Int8-0602.jsonl \
+      --port 8900
 
 接口:
-    GET /scores/{id}    按 id 查询，返回一条 JSON
+    GET /scores/{id}    按 id 查询，返回处理后的 JSON
     GET /scores         id 为空时返回第一条
     GET /scores/        同上
     GET /ids            返回所有 id 列表
@@ -27,103 +24,165 @@ import re
 import sys
 from pathlib import Path
 
+# 支持 python app/math_render_service.py 直接启动
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 import uvicorn
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 
-
-# ── 行内公式空格修复 ─────────────────────────────────────────────────────
-# KaTeX 要求行内公式 $...$ 的 $ 与内容之间不能有空格，否则无法渲染。
-# 例如 $ m = -\frac{3}{4} $ → $m = -\frac{3}{4}$
-
-_DISPLAY_MATH_RE = re.compile(r"\$\$.*?\$\$", re.DOTALL)
-_INLINE_MATH_RE = re.compile(r"\$([^$]+?)\$")
+from app.think_tag_buffer import ThinkTagBuffer
+from app.sentence_buffer import SentenceBuffer
+from app.latex import normalize_latex_formulas
 
 
-def _fix_inline_math(text: str) -> str:
-    """修复行内公式空格：$ xxx $ → $xxx$（不影响 $$...$$ 块级公式）。"""
-    if not text or "$" not in text:
-        return text
+# ── 模拟流式输出 ───────────────────────────────────────────────────────────
 
-    # 1. 保护 $$...$$ 块级公式
-    placeholders: list[str] = []
+class FakeStreamer:
+    """将完整文本逐 token 模拟流式输出。
 
-    def _save(m):
-        placeholders.append(m.group(0))
-        return f"%%MATH{len(placeholders) - 1}%%"
+    遇到 <think...> 或 </think...> 标签时，将整个标签作为单个 token 返回，
+    模拟真实模型流式输出中标签是完整 token 的行为。
+    其余内容按 chunk_size 逐块返回。
+    """
 
-    protected = _DISPLAY_MATH_RE.sub(_save, text)
+    _THINK_OPEN_RE = re.compile(r"<think[^>]*>")
+    _THINK_CLOSE_RE = re.compile(r"</think\s*>")
 
-    # 2. 修复行内公式：去掉 $ 紧内侧的首尾空格
-    def _trim(m):
-        inner = m.group(1)
-        stripped = inner.strip()
-        return f"${stripped}$" if stripped != inner else m.group(0)
+    def __init__(self, text: str, chunk_size: int = 1):
+        self.text = text
+        self.chunk_size = chunk_size
+        self.pos = 0
 
-    fixed = _INLINE_MATH_RE.sub(_trim, protected)
+    def __iter__(self):
+        return self
 
-    # 3. 恢复块级公式
-    for idx, block in enumerate(placeholders):
-        fixed = fixed.replace(f"%%MATH{idx}%%", block)
+    def __next__(self) -> str:
+        if self.pos >= len(self.text):
+            raise StopIteration
 
-    return fixed
+        # 检查当前位置是否是 think 标签，如果是则完整返回
+        for pattern in (self._THINK_OPEN_RE, self._THINK_CLOSE_RE):
+            m = pattern.match(self.text, self.pos)
+            if m:
+                token = m.group(0)
+                self.pos = m.end()
+                return token
 
-
-# ── 去掉 <think...>...</think > 思考过程 ──────────────────────────────────
-# Qwen3 等模型的输出包含 <think xmlns="...">...</think > 包裹的思考过程，
-# 前端不需要展示，加载时去掉。
-
-_THINK_TAG_RE = re.compile(r"<think[^>]*>.*?</think\s*>", re.DOTALL)
-
-
-def _strip_think_tags(text: str) -> str:
-    """去掉 <think...>...</think > 包裹的思考过程文本。"""
-    if not text or "<think" not in text:
-        return text
-    return _THINK_TAG_RE.sub("", text).strip()
+        chunk = self.text[self.pos:self.pos + self.chunk_size]
+        self.pos += self.chunk_size
+        return chunk
 
 
-# ── \boxed{} 包裹修复 ───────────────────────────────────────────────────
-# 模型输出 \boxed{xxx} 时偶尔没有用 $ 包裹，KaTeX 无法渲染。
-# 检测裸露的 \boxed{...}（前面不是 $），自动补上 $...$。
+# ── 处理管线 ───────────────────────────────────────────────────────────────
 
-_BOXED_RE = re.compile(r"(?<!\$)(\\boxed\{(?:[^{}]|\{(?:[^{}]|\{[^{}]*\})*\})*\})")
+async def _process_model_output(item_id: str, model_output: str) -> dict:
+    """处理流水线：去思考标签 → 断句 → LaTeX修复。"""
+
+    # Step 1: FakeStreamer + ThinkTagBuffer 去思考标签
+    streamer = FakeStreamer(model_output)
+    think_buffer = ThinkTagBuffer()
+    sentence_buffer = SentenceBuffer()
+
+    segments: list[str] = []
+
+    for token in streamer:
+        filtered = think_buffer.add(token)
+        if filtered is None:
+            continue
+        for char in filtered:
+            segment = sentence_buffer.add(char)
+            if segment:
+                segments.append(segment)
+
+    # flush think_buffer 剩余
+    remaining = think_buffer.flush()
+    if remaining:
+        for char in remaining:
+            segment = sentence_buffer.add(char)
+            if segment:
+                segments.append(segment)
+    print(f"segments len is {len(segments)}")
+    # flush sentence_buffer 剩余
+    final_segment = await sentence_buffer.flush(is_final=True)
+    if final_segment and final_segment.content:
+        segments.append(final_segment.content)
+
+    # Step 2: LaTeX 修复
+    fixed_segments = [normalize_latex_formulas(s) for s in segments]
+    print(f"fixed_segments len is {len(fixed_segments)}")
+    # Step 3: 拼接
+    model_output_new = "".join(fixed_segments)
+
+    return {
+        "id": item_id,
+        "segments": segments,
+        "fixed_segments": fixed_segments,
+        "model_output_new": model_output_new,
+    }
 
 
-def _fix_boxed_wrapping(text: str) -> str:
-    """为未被 $ 包裹的 \boxed{...} 补上 $...$（跳过已在 $$...$$ 内的）。"""
-    if not text or "\\boxed{" not in text:
-        return text
+# ── 缓存 & 文件保存 ───────────────────────────────────────────────────────
 
-    # 1. 保护 $$...$$ 块级公式，避免误包内部 \boxed
-    placeholders: list[str] = []
+_processed: dict[str, dict] = {}   # id → 处理结果缓存
+_output_dir: Path | None = None
+_sentences_file: Path | None = None
+_latex_fixed_file: Path | None = None
 
-    def _save(m):
-        placeholders.append(m.group(0))
-        return f"%%DMATH{len(placeholders) - 1}%%"
 
-    protected = _DISPLAY_MATH_RE.sub(_save, text)
+def _init_output_paths(file_paths: list[Path]):
+    """根据 --file 路径推导输出文件路径。"""
+    global _output_dir, _sentences_file, _latex_fixed_file
+    if not file_paths:
+        return
+    primary = file_paths[0].resolve()
+    _output_dir = primary.parent
+    stem = primary.stem
+    _sentences_file = _output_dir / f"{stem}_sentences.json"
+    _latex_fixed_file = _output_dir / f"{stem}_latex_fixed.json"
+    print(f"输出文件: {_sentences_file}")
+    print(f"输出文件: {_latex_fixed_file}")
 
-    # 2. 对裸露的 \boxed{...} 补 $...$
-    def _wrap(m):
-        return f"${m.group(1)}$"
 
-    fixed = _BOXED_RE.sub(_wrap, protected)
+def _save_results():
+    """将处理结果保存到 JSON 文件。"""
+    if not _processed or not _sentences_file or not _latex_fixed_file:
+        return
 
-    # 3. 恢复块级公式
-    for idx, block in enumerate(placeholders):
-        fixed = fixed.replace(f"%%DMATH{idx}%%", block)
+    # sentences.json: [{id, segments}, ...]
+    sentences_data = [
+        {"id": v["id"], "segments": v["segments"]}
+        for v in _processed.values()
+    ]
+    _sentences_file.write_text(
+        json.dumps(sentences_data, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
 
-    return fixed
+    # latex_fixed.json: [{id, fixed_segments, model_output_new}, ...]
+    latex_data = [
+        {
+            "id": v["id"],
+            "fixed_segments": v["fixed_segments"],
+            "model_output_new": v["model_output_new"],
+        }
+        for v in _processed.values()
+    ]
+    _latex_fixed_file.write_text(
+        json.dumps(latex_data, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
 
-# 全局数据存储 {id: record}
+
+# ── 数据加载 ───────────────────────────────────────────────────────────────
+
 _data: dict[str, dict] = {}
 _data_files: list[Path] = []
 
 
 @asynccontextmanager
 async def lifespan(application: FastAPI):
-    """启动时加载数据。"""
+    """启动时加载原始数据（不做修复）。"""
     global _data, _data_files
     file_paths = application.state.file_paths
     if not file_paths:
@@ -135,16 +194,17 @@ async def lifespan(application: FastAPI):
     for p in file_paths:
         print(f"加载数据: {p}")
     _data_files = file_paths
+    _init_output_paths(file_paths)
     _data = load_jsonl_multi(file_paths)
     print(f"共 {len(_data)} 条记录")
     yield
 
 
-app = FastAPI(title="PRM Scores API", version="1.0.0", lifespan=lifespan)
+app = FastAPI(title="PRM Scores API", version="2.0.0", lifespan=lifespan)
 
 
 def load_jsonl(path: Path) -> dict[str, dict]:
-    """加载单个 JSONL 文件，返回 {id: record} 字典。自动修复公式渲染。"""
+    """加载单个 JSONL 文件，返回 {id: record} 字典。保留原始数据，不做修复。"""
     result = {}
     with open(path, "r", encoding="utf-8") as f:
         for line in f:
@@ -154,7 +214,6 @@ def load_jsonl(path: Path) -> dict[str, dict]:
             record = json.loads(line)
             rid = record.get("id", "")
             if rid:
-                _fix_record_math(record)
                 result[rid] = record
     return result
 
@@ -167,27 +226,9 @@ def load_jsonl_multi(paths: list[Path]) -> dict[str, dict]:
     return result
 
 
-# 需要修复行内公式空格的顶层文本字段
-_TEXT_FIELDS = ("question", "model_output", "reference_answer")
-
-
-def _fix_record_math(record: dict):
-    """对 record 中的文本字段和 steps[].text 修复公式渲染问题。"""
-    for key in _TEXT_FIELDS:
-        if key in record and isinstance(record[key], str):
-            record[key] = _strip_think_tags(record[key])
-            record[key] = _fix_boxed_wrapping(record[key])
-            record[key] = _fix_inline_math(record[key])
-    for step in record.get("steps", []):
-        if isinstance(step, dict) and "text" in step and isinstance(step["text"], str):
-            step["text"] = _strip_think_tags(step["text"])
-            step["text"] = _fix_boxed_wrapping(step["text"])
-            step["text"] = _fix_inline_math(step["text"])
-
-
 def _find_default_file() -> Path | None:
     """在 results/prm/ 下查找第一个 *-gaokao-*.jsonl 文件。"""
-    prm_dir = Path(__file__).resolve().parent.parent / "results" / "prm"
+    prm_dir = Path(__file__).resolve().parent.parent.parent / "results" / "prm"
     if not prm_dir.exists():
         return None
     for f in sorted(prm_dir.glob("*-gaokao-*.jsonl")):
@@ -195,40 +236,63 @@ def _find_default_file() -> Path | None:
     return None
 
 
+# ── API 端点 ───────────────────────────────────────────────────────────────
+
 @app.get("/")
 def health():
-    return {"status": "ok", "total": len(_data)}
+    return {
+        "status": "ok",
+        "total": len(_data),
+        "processed": len(_processed),
+    }
 
 
 @app.get("/ids")
 def list_ids():
-    """重新加载数据并返回所有 id 列表。"""
-    global _data
-    if _data_files:
-        _data = load_jsonl_multi(_data_files)
+    """返回所有 id 列表。"""
     return list(_data.keys())
 
 
 @app.get("/scores/{item_id}")
-def get_score(item_id: str):
-    """按 id 查询一条记录。"""
+async def get_score(item_id: str):
+    """按 id 查询一条记录，自动处理 model_output。"""
     if item_id not in _data:
         raise HTTPException(status_code=404, detail=f"id '{item_id}' 未找到")
-    return _data[item_id]
+
+    record = dict(_data[item_id])  # 浅拷贝，不修改原始数据
+
+    # 已缓存则直接用
+    if item_id in _processed:
+        record["model_output_original"] = _data[item_id].get("model_output", "")
+        record["model_output"] = _processed[item_id]["model_output_new"]
+        return record
+
+    # 处理流水线
+    model_output = record.get("model_output", "")
+    if model_output:
+        result = await _process_model_output(item_id, model_output)
+        _processed[item_id] = result
+        _save_results()
+        record["model_output_original"] = model_output
+        record["model_output"] = result["model_output_new"]
+    else:
+        record["model_output_original"] = ""
+
+    return record
 
 
 @app.get("/scores")
 @app.get("/scores/")
-def get_first():
+async def get_first():
     """id 为空时返回第一条记录。"""
     if not _data:
         raise HTTPException(status_code=404, detail="无数据")
     first_id = next(iter(_data))
-    return _data[first_id]
+    return await get_score(first_id)
 
 
 def main():
-    parser = argparse.ArgumentParser(description="PRM 评分数据查询 API")
+    parser = argparse.ArgumentParser(description="PRM 评分数据查询 API（带流式处理管线）")
     parser.add_argument("--file", type=str, nargs="+", default=None, help="JSONL 文件路径（支持多个）")
     parser.add_argument("--host", type=str, default="0.0.0.0", help="监听地址")
     parser.add_argument("--port", type=int, default=8900, help="监听端口")
