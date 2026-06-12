@@ -279,6 +279,215 @@ def wrap_bare_boxed(text: str) -> str:
 
     return ''.join(result)
 
+def _match_command(text: str, pos: int, command: str) -> bool:
+    """检查 text[pos:] 是否以 \\command 开头。"""
+    if pos + len(command) >= len(text):
+        return False
+    return text[pos:pos + len(command)] == command
+
+
+def _consume_brace_group(text: str, pos: int) -> Optional[int]:
+    r"""从 text[pos]（应为 '{'）消费一个花括号组，返回闭 '}' 之后的位置，不匹配返回 None。"""
+    if pos >= len(text) or text[pos] != '{':
+        return None
+    depth = 1
+    i = pos + 1
+    while i < len(text) and depth > 0:
+        if text[i] == '\\' and i + 1 < len(text):
+            i += 2
+            continue
+        if text[i] == '{':
+            depth += 1
+        elif text[i] == '}':
+            depth -= 1
+        i += 1
+    return i if depth == 0 else None
+
+
+_BEGIN_CMD = r'\begin{'
+_END_CMD = r'\end{'
+
+
+def _strip_inline_dollars(text: str) -> str:
+    r"""移除 $...$ 定界符，保留内部内容。
+
+    用于 tabular→array 转换：在 $$\begin{array}...\end{array}$$ 内部，
+    原来的 $...$ 是多余的（已经在数学模式中）。
+    """
+    result: list[str] = []
+    i = 0
+    while i < len(text):
+        # 跳过 $$（安全处理）
+        if text[i:i+2] == '$$':
+            result.append('$$')
+            i += 2
+            continue
+        if text[i] == '$':
+            i += 1  # 跳过开 $
+            while i < len(text):
+                if text[i:i+2] == '$$':
+                    break
+                if text[i] == '$':
+                    i += 1  # 跳过闭 $
+                    break
+                result.append(text[i])
+                i += 1
+            continue
+        result.append(text[i])
+        i += 1
+    return ''.join(result)
+
+
+def convert_tabular_to_array(text: str) -> str:
+    r"""
+    将 \begin{tabular}{col}...\end{tabular} 转换为 \begin{array}{col}...\end{array}，
+    并剥离内部 $...$ 定界符。
+
+    KaTeX 不支持 tabular 环境。此函数将其转为等效的 array 环境，
+    同时移除内部 $...$（在 $$\begin{array}...\end{array}$$ 内已处于数学模式，$...$ 冗余）。
+
+    Examples:
+        >>> convert_tabular_to_array(r"\begin{tabular}{|l|l|} a & $b$ \end{tabular}")
+        '\\\\begin{array}{|l|l|} a & b \\\\end{array}'
+
+    Args:
+        text: 可能包含 tabular 环境的文本
+
+    Returns:
+        tabular 已转为 array 的文本
+    """
+    if not text or '\\begin{tabular}' not in text:
+        return text
+
+    def _convert(m):
+        col_spec = m.group(1)
+        body = _strip_inline_dollars(m.group(2))
+        return f'\\begin{{array}}{col_spec}{body}\\end{{array}}'
+
+    return re.sub(
+        r'\\begin\{tabular\}(\{[^}]+\})(.*?)\\end\{tabular\}',
+        _convert,
+        text,
+        flags=re.DOTALL,
+    )
+
+
+def wrap_bare_environments(text: str) -> str:
+    r"""
+    将裸露的 \begin{X}...\end{X} 用 $$...$$ 包裹。
+
+    仅包裹不在 $...$ 或 $$...$$ 内部的 \begin{X}...\end{X} 环境。
+
+    Examples:
+        >>> wrap_bare_environments(r"\begin{tabular}{|l|l|} \hline a \\\\ \end{tabular}")
+        '$$\\begin{tabular}{|l|l|} \\hline a \\\\\\end{tabular}$$'
+        >>> wrap_bare_environments("$$\\begin{array} x \\end{array}$$")
+        '$$\\begin{array} x \\end{array}$$'
+
+    Args:
+        text: 可能包含裸露 LaTeX 环境的文本
+
+    Returns:
+        裸露环境已用 $$...$$ 包裹的文本
+    """
+    result: list[str] = []
+    i = 0
+    in_formula = False
+    formula_delim: Optional[str] = None
+
+    while i < len(text):
+        # 处理 $$ 定界符
+        if text[i:i+2] == '$$':
+            if not in_formula:
+                in_formula = True
+                formula_delim = '$$'
+            elif formula_delim == '$$':
+                in_formula = False
+                formula_delim = None
+            result.append('$$')
+            i += 2
+            continue
+
+        # 处理 $ 定界符
+        if text[i] == '$':
+            if not in_formula:
+                in_formula = True
+                formula_delim = '$'
+            elif formula_delim == '$':
+                in_formula = False
+                formula_delim = None
+            result.append('$')
+            i += 1
+            continue
+
+        # 已在公式内部 —— 原样复制
+        if in_formula:
+            result.append(text[i])
+            i += 1
+            continue
+
+        # ── 在公式外部：检测 \begin{X} ──
+        if text[i:i + len(_BEGIN_CMD)] == _BEGIN_CMD:
+            # 提取环境名 \begin{env_name}
+            name_start = i + len(_BEGIN_CMD) - 1  # 指向 '{'
+            name_end = _consume_brace_group(text, name_start)
+            if name_end is None:
+                # 不完整，原样保留
+                result.append(text[i])
+                i += 1
+                continue
+            env_name = text[name_start + 1:name_end - 1]
+
+            # 在 \end{env_name} 之前的内容（含可能的额外花括号参数）都属于环境体
+            # 向后扫描匹配的 \end{env_name}
+            end_tag = _END_CMD + env_name + '}'
+            search_pos = name_end
+            depth = 1  # 嵌套层数
+            env_body_start = name_end
+            found_end = -1
+
+            while search_pos < len(text) and depth > 0:
+                next_begin = text.find(_BEGIN_CMD, search_pos)
+                next_end = text.find(end_tag, search_pos)
+
+                if next_end < 0:
+                    break  # 没找到闭合标签
+
+                if 0 <= next_begin < next_end:
+                    # 嵌套同名的 \begin — 需要检查环境名是否一致
+                    nb_name_start = next_begin + len(_BEGIN_CMD) - 1
+                    nb_name_end = _consume_brace_group(text, nb_name_start)
+                    if nb_name_end and text[nb_name_start + 1:nb_name_end - 1] == env_name:
+                        depth += 1
+                    search_pos = nb_name_end if nb_name_end else next_begin + 1
+                    continue
+
+                depth -= 1
+                if depth == 0:
+                    found_end = next_end
+                search_pos = next_end + len(end_tag)
+
+            if found_end < 0:
+                # 未找到闭合 \end{env_name}，原样保留
+                result.append(text[i])
+                i += 1
+                continue
+
+            # 完整匹配：用 $$ 包裹 \begin{X}...\end{X}
+            env_end = found_end + len(end_tag)
+            result.append('$$')
+            result.append(text[i:env_end])
+            result.append('$$')
+            i = env_end
+            continue
+
+        # 普通字符
+        result.append(text[i])
+        i += 1
+
+    return ''.join(result)
+
+
 def normalize_latex_formulas(text: str) -> str:
     r"""
     执行完整的 LaTeX 公式规范化。
@@ -287,7 +496,9 @@ def normalize_latex_formulas(text: str) -> str:
     1. 规范化定界符（\( \) \[ \] → $ $$）
     2. 移除定界符内侧空格
     3. 将裸露的 \boxed{...} 用 $...$ 包裹
-    4. 将 \text 替换为 \mathrm
+    4. 将 tabular 转为 array 并剥离内部 $...$
+    5. 将裸露的 \begin{X}...\end{X} 用 $$...$$ 包裹
+    6. 将 \text 替换为 \mathrm
 
     Examples:
         >>> normalize_latex_formulas(r"\( S_n = a_1 \cdot q^{n-1} \)")
@@ -306,6 +517,8 @@ def normalize_latex_formulas(text: str) -> str:
     text = normalize_latex_delimiters(text)
     text = clean_latex_formula_spaces(text)
     text = wrap_bare_boxed(text)
+    text = convert_tabular_to_array(text)
+    text = wrap_bare_environments(text)
     text = re.sub(r'\\text\b', r'\\mathrm', text)
     return text
 

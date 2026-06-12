@@ -39,38 +39,54 @@ from app.latex import normalize_latex_formulas
 # ── 模拟流式输出 ───────────────────────────────────────────────────────────
 
 class FakeStreamer:
-    """将完整文本逐 token 模拟流式输出。
+    """将完整文本模拟成流式 chunk 输出。
 
-    遇到 <think...> 或 </think...> 标签时，将整个标签作为单个 token 返回，
-    模拟真实模型流式输出中标签是完整 token 的行为。
-    其余内容按 chunk_size 逐块返回。
+    特点：
+    1. 遇到 <think> 或 </think> 时，整个标签作为一个 token 返回；
+    2. 其他内容按 chunk_size 切块返回；
+    3. 不打印调试信息；
+    4. 校验 chunk_size，避免死循环；
+    5. 支持大小写标签，例如 <Think>、</THINK>。
     """
 
-    _THINK_OPEN_RE = re.compile(r"<think[^>]*>")
-    _THINK_CLOSE_RE = re.compile(r"</think\s*>")
+    _THINK_TAG_RE = re.compile(r"</?think>", re.IGNORECASE)
 
     def __init__(self, text: str, chunk_size: int = 1):
-        self.text = text
+        if chunk_size <= 0:
+            raise ValueError("chunk_size 必须大于 0")
+
+        self.text = text or ""
         self.chunk_size = chunk_size
         self.pos = 0
+        self.length = len(self.text)
 
     def __iter__(self):
         return self
 
     def __next__(self) -> str:
-        if self.pos >= len(self.text):
+        if self.pos >= self.length:
             raise StopIteration
 
-        # 检查当前位置是否是 think 标签，如果是则完整返回
-        for pattern in (self._THINK_OPEN_RE, self._THINK_CLOSE_RE):
-            m = pattern.match(self.text, self.pos)
-            if m:
-                token = m.group(0)
-                self.pos = m.end()
-                return token
+        # 如果当前位置正好是 <think> 或 </think>，完整返回标签
+        match = self._THINK_TAG_RE.match(self.text, self.pos)
+        if match:
+            self.pos = match.end()
+            return match.group(0)
 
-        chunk = self.text[self.pos:self.pos + self.chunk_size]
-        self.pos += self.chunk_size
+        # 普通文本按 chunk_size 返回，但不能把即将出现的 think 标签切断
+        next_tag = self._THINK_TAG_RE.search(self.text, self.pos)
+
+        if next_tag:
+            end = min(self.pos + self.chunk_size, next_tag.start())
+        else:
+            end = min(self.pos + self.chunk_size, self.length)
+
+        # 理论兜底：避免 end == self.pos 导致死循环
+        if end <= self.pos:
+            end = min(self.pos + self.chunk_size, self.length)
+
+        chunk = self.text[self.pos:end]
+        self.pos = end
         return chunk
 
 
@@ -87,6 +103,8 @@ async def _process_model_output(item_id: str, model_output: str) -> dict:
     segments: list[str] = []
 
     for token in streamer:
+        if 'think' in token:
+            print('_process_model_output token ', token)
         filtered = think_buffer.add(token)
         if filtered is None:
             continue

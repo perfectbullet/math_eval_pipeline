@@ -145,10 +145,10 @@ def main():
     metrics_no_think = streaming_chat(
         client, args.model, args.prompt,
         max_tokens=args.max_tokens,
-        temperature=args.temperature,
-        top_p=args.top_p,
-        top_k=args.top_k,
-        presence_penalty=args.presence_penalty,
+        # temperature=args.temperature,
+        # top_p=args.top_p,
+        # top_k=args.top_k,
+        # presence_penalty=args.presence_penalty,
         enable_thinking=False,
     )
 

@@ -28,3 +28,13 @@ reports-233
 data/standardized/*
 mineru_deal/output/*
 data/standardized/*
+data/standardized/*
+data/standardized/*
+mineru_deal/output/*
+data/standardized/gaokao_bench.jsonl
+mineru_deal/output/results.jsonl
+chat_history.jsonl
+1.md
+tir_math/chat_history_Qwen2-Math-72B-Instruct-W4A16.jsonl
+math_render_service/使用方法.md
+math_render_service/CLAUDE.md

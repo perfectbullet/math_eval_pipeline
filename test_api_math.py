@@ -2,8 +2,8 @@
 
 from openai import OpenAI
 
-client = OpenAI(api_key="EMPTY", base_url="http://192.168.100.201:8200/v1")
-model_name = 'Qwen3-32B-AWQ'
+client = OpenAI(api_key="EMPTY", base_url="http://192.168.100.203:8200/v1")
+model_name = 'Qwen2.5-Math-72B-Instruct'
 # Test streaming
 print("=== Streaming Test ===")
 
@@ -21,10 +21,11 @@ stream = client.chat.completions.create(
     model=model_name,
     messages=[
         {"role": "system", "content": "请逐步推理，并将最终答案放在 \\boxed{} 内。"},
-        {"role": "user", "content": q2},
+        {"role": "user", "content": q},
     ],
-    temperature=0.6,
-    max_tokens=8191,
+    temperature=0.1,
+    top_p=0.95,
+    max_tokens=3000,
     stream=True,
     timeout=600,
 )

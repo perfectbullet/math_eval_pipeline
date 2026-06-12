@@ -76,6 +76,10 @@ class SentenceBuffer:
     # Bare \boxed{...} pattern (math model outputs without $ delimiters)
     _BARE_BOXED_PATTERN = re.compile(r'\\boxed\s*\{')
 
+    # LaTeX environment delimiters: \begin{X} ... \end{X}
+    _BEGIN_ENV_PATTERN = re.compile(r'\\begin\{([^}]+)\}')
+    _END_ENV_PATTERN = re.compile(r'\\end\{([^}]+)\}')
+
     # LaTeX delimiter pairs for formula detection
     DELIMITER_PAIRS = [
         ('$$', '$$', 2),
@@ -131,12 +135,49 @@ class SentenceBuffer:
     def _is_in_latex_formula(self, text: str, position: int) -> bool:
         """Check if a position is within a LaTeX formula delimiter."""
         counts = self._count_latex_delimiters(text[:position])
-        return (
+        if (
             counts["display_dollar"] % 2 == 1
             or counts["inline_dollar"] % 2 == 1
             or counts["paren_open"] > counts["paren_close"]
             or counts["bracket_open"] > counts["bracket_close"]
-        )
+        ):
+            return True
+        # Check if inside a \begin{X}...\end{X} environment
+        prefix = text[:position]
+        if len(self._BEGIN_ENV_PATTERN.findall(prefix)) > len(self._END_ENV_PATTERN.findall(prefix)):
+            return True
+        # Check if inside a bare \boxed{...}
+        if self._is_inside_bare_boxed(prefix):
+            return True
+        return False
+
+    def _is_inside_bare_boxed(self, text: str) -> bool:
+        """Check if text ends inside a bare (not in $...$) \\boxed{...}."""
+        for m in self._BARE_BOXED_PATTERN.finditer(text):
+            brace_pos = m.end() - 1  # position of '{'
+            depth = 1
+            j = brace_pos + 1
+            while j < len(text) and depth > 0:
+                if text[j] == '\\' and j + 1 < len(text):
+                    j += 2
+                    continue
+                if text[j] == '{':
+                    depth += 1
+                elif text[j] == '}':
+                    depth -= 1
+                j += 1
+            if depth > 0:
+                return True
+        return False
+
+    def _get_unclosed_environment(self, text: str) -> Optional[str]:
+        """Return the name of the first unclosed \\begin{X} environment, or None."""
+        begins = self._BEGIN_ENV_PATTERN.findall(text)
+        ends = self._END_ENV_PATTERN.findall(text)
+        for env in set(begins):
+            if begins.count(env) > ends.count(env):
+                return env
+        return None
 
     def _get_unclosed_delimiter_type(self, text: str) -> Optional[str]:
         """Check if text has unclosed LaTeX formula delimiters."""
@@ -150,6 +191,12 @@ class SentenceBuffer:
             return r'\('
         if counts["inline_dollar"] % 2 != 0:
             return '$'
+        # Check for unclosed bare \boxed{...}
+        if self._is_inside_bare_boxed(text):
+            return r'\boxed'
+        # Check for unclosed \begin{X} environment
+        if self._get_unclosed_environment(text) is not None:
+            return r'\begin'
         return None
 
     def _find_last_standalone_dollar(self, text: str) -> int:
@@ -177,6 +224,29 @@ class SentenceBuffer:
 
     def _find_formula_boundary_split(self, text: str, delimiter: str) -> Tuple[int, str]:
         """Find a safe split position when dealing with unclosed formulas."""
+        # Handle \begin{X} environment
+        if delimiter == r'\begin':
+            env_name = self._get_unclosed_environment(text)
+            if env_name:
+                opening = f'\\begin{{{env_name}}}'
+                pos = text.rfind(opening)
+                if pos > 0:
+                    return pos, "char_limit_before_formula"
+                if pos == 0:
+                    return -1, "formula_at_start"
+            return -1, "no_split"
+
+        # Handle bare \boxed{...}
+        if delimiter == r'\boxed':
+            matches = list(self._BARE_BOXED_PATTERN.finditer(text))
+            if matches:
+                pos = matches[-1].start()
+                if pos > 0:
+                    return pos, "char_limit_before_formula"
+                if pos == 0:
+                    return -1, "formula_at_start"
+            return -1, "no_split"
+
         pos = (
             self._find_last_standalone_dollar(text) if delimiter == '$'
             else text.rfind(delimiter)
@@ -240,6 +310,35 @@ class SentenceBuffer:
 
     def _find_latex_closing_delimiter(self, text: str, unclosed_type: str) -> Tuple[int, str]:
         """Find closing delimiter for an unclosed LaTeX formula."""
+        # Handle \begin{X} environment
+        if unclosed_type == r'\begin':
+            env_name = self._get_unclosed_environment(text)
+            if env_name:
+                closing = f'\\end{{{env_name}}}'
+                pos = text.rfind(closing)
+                if pos >= 0:
+                    return pos + len(closing), "latex_closing"
+            return -1, "no_closing"
+
+        # Handle bare \boxed{...}
+        if unclosed_type == r'\boxed':
+            for m in self._BARE_BOXED_PATTERN.finditer(text):
+                brace_pos = m.end() - 1
+                depth = 1
+                j = brace_pos + 1
+                while j < len(text) and depth > 0:
+                    if text[j] == '\\' and j + 1 < len(text):
+                        j += 2
+                        continue
+                    if text[j] == '{':
+                        depth += 1
+                    elif text[j] == '}':
+                        depth -= 1
+                    j += 1
+                if depth == 0:
+                    return j, "latex_closing"
+            return -1, "no_closing"
+
         closing_map = {
             '$': ('$', 1),
             '$$': ('$$', 2),

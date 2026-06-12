@@ -41,7 +41,7 @@ def call_vllm(
 
     extra_body = {
         # enable thinking, set to False to disable test
-        "enable_thinking": True,
+        # "enable_thinking": True,
         # use thinking_budget to contorl num of tokens used for thinking
         # "thinking_budget": 4096
     }

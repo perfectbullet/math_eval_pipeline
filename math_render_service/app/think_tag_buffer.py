@@ -1,4 +1,5 @@
 """Think Tag Buffer 用于过滤流式文本中的 think 标签。"""
+import re
 from typing import Optional
 
 
@@ -35,7 +36,7 @@ class ThinkTagBuffer:
         """
         if not token:
             return None
-
+        
         if self.state == self.STATE_OUTSIDE:
             return self._handle_outside(token)
         elif self.state == self.STATE_DETECT_OPEN:

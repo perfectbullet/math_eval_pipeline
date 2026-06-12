@@ -15,13 +15,22 @@ from openai import OpenAI
 # MODEL = "qwen3-14b"
 
 
+# client = OpenAI(
+#     api_key="EMPTY",
+#     base_url="http://192.168.100.201:8200/v1",
+# )
+# MODEL = "weights/Confucius3-Math"
+
+
 client = OpenAI(
     api_key="EMPTY",
-    base_url="http://192.168.100.201:8200/v1",
+    base_url="http://192.168.100.203:8200/v1",
 )
-MODEL = "weights/Confucius3-Math"
+MODEL = "Qwen2-Math-72B-Instruct"
+
 
 QUESTION = "当 $x$ 属于 $[-2, 1]$ 的闭区间时，不等式 $a x^{3} - x^{2} + 4 x + 3 \\geq 0$ 恒成立，则实数 $a$ 的取值范围是多少？"
+
 
 start_time = time.perf_counter()
 first_token_time = None
@@ -43,6 +52,22 @@ if 'Confucius3-Math' in MODEL:
         stream=True,
         timeout=600,
     )
+elif 'Qwen2-Math-72B' in MODEL:
+    stream = client.chat.completions.create(
+        model=MODEL,
+        messages=[
+            {"role": "system", "content": "请逐步推理，并将最终答案放在 \\boxed{} 内。"},
+            {"role": "user", "content": QUESTION}
+        ],
+        temperature=0.1,
+        top_p=0.95,
+        max_tokens=3000,
+        stream=True,
+        timeout=600,
+        extra_body={
+            "chat_template_kwargs": {"enable_thinking": False},
+        }
+    )
 else:
     # qwen对于思考模式（enable_thinking=True），使用 Temperature=0.6、TopP=0.95、TopK=20 和 MinP=0。不要使用贪婪解码，因为它可能导致性能下降和无尽的重复。
     stream = client.chat.completions.create(
@@ -51,6 +76,7 @@ else:
             {"role": "system", "content": "请逐步推理，并将最终答案放在 \\boxed{} 内。"},
             {"role": "user", "content": QUESTION}
         ],
+        max_tokens=3000,
         stream=True,
         timeout=600,
     )
