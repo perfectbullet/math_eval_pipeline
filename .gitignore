@@ -38,3 +38,11 @@ chat_history.jsonl
 tir_math/chat_history_Qwen2-Math-72B-Instruct-W4A16.jsonl
 math_render_service/使用方法.md
 math_render_service/CLAUDE.md
+mineru_deal/data/math_qa_275_20260612.mineru.json
+tir_math/chat_history_Qwen3-32B-0611.jsonl
+
+# External git repos (use submodule if needed)
+external/Qwen-Agent/
+
+# Runtime artifacts
+tir_math/run_pids/
