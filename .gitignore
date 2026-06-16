@@ -46,3 +46,4 @@ external/Qwen-Agent/
 
 # Runtime artifacts
 tir_math/run_pids/
+reports/*

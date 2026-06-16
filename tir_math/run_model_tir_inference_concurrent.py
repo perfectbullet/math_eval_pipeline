@@ -54,7 +54,8 @@ def run_agent_query(bot, question: str) -> tuple[str, dict]:
     try:
         messages = [{"role": "user", "content": question}]
         last_response = None
-        for response in bot.run(messages):
+        for response in bot.run(messages, delta_stream=True):
+            # print(response)
             last_response = response
 
         # 从最后的响应中提取 assistant 内容

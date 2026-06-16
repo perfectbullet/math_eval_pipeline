@@ -106,3 +106,24 @@ python run_model_tir_inference_concurrent.py \
   --model Qwen3-32B \
   --limit 10 \
   --mode cot --lang en --workers 4
+
+
+
+
+
+
+
+
+
+
+# 它会自动生成类似： ../data/model_outputs/math_qa_275/model_outputs-math_qa_275_20260612_cot_en_qwen3-32b.jsonl
+
+
+bash run_single_mode_lang_inference.sh \
+  --mode cot \
+  --lang en \
+  --input ../data/math_qa_275_20260612.mineru.json \
+  --api_base http://192.168.100.203:8200/v1 \
+  --model QwQ-32B \
+  --workers 8 \
+  --limit 300

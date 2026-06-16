@@ -3,32 +3,37 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SELF_PATH="$(cd "$SCRIPT_DIR" && pwd)/$(basename "${BASH_SOURCE[0]}")"
-PYTHON_BIN="/home/zj/miniconda3/envs/math-eval/bin/python"
-INPUT="../data/math_qa_275_20260612.mineru.json"
-OUTPUT_DIR="../data/model_outputs/math_qa_275"
-API_BASE="http://192.168.100.203:8200/v1"
-MODEL="Qwen3-32B"
-WORKERS=8
-LIMIT=8
-API_KEY="no-key"
+DEFAULT_DEV_PYTHON="/home/zj/miniconda3/envs/math-eval/bin/python"
+DEFAULT_SERVER_PYTHON="/home/zenking/miniconda3/envs/math_verify/bin/python"
+RUN_DATE="${RUN_DATE:-$(date '+%Y%m%d')}"
+PYTHON_BIN=""
+INPUT=""
+OUTPUT_DIR=""
+API_BASE=""
+MODEL=""
+WORKERS=""
+LIMIT=""
+API_KEY=""
 
 LOG_DIR="${SCRIPT_DIR}/logs"
 PID_DIR="${SCRIPT_DIR}/run_pids"
+COMMAND="start"
+FORWARD_ARGS=()
 
 usage() {
     cat <<'EOF'
 用法：
-  bash run_all_mode_lang_inference.sh [options]
+  bash run_all_mode_lang_inference.sh [start|status|stop] [options]
 
 可选参数：
-  --python_bin PATH   Python 可执行文件，默认 /home/zj/miniconda3/envs/math-eval/bin/python
-  --input PATH        输入文件，默认 ../data/math_qa_275_20260612.mineru.json
-  --output_dir PATH   输出目录，默认 ../data/model_outputs/math_qa_275
-  --api_base URL      模型服务地址，默认 http://192.168.100.203:8200/v1
-  --model NAME        模型名，默认 Qwen3-32B
-  --workers N         并发数，默认 8
-  --limit N           限制条数，默认 8
-  --api_key KEY       API key，默认 no-key
+  --python_bin PATH   Python 可执行文件，优先级最高
+  --input PATH        输入文件（必填）
+  --output_dir PATH   输出目录（必填）
+  --api_base URL      模型服务地址（必填）
+  --model NAME        模型名（必填）
+  --workers N         并发数（必填）
+  --limit N           限制条数（必填）
+  --api_key KEY       API key（必填）
   --help              显示帮助
 
 说明：
@@ -37,41 +42,64 @@ usage() {
   2. 脚本本身会以后台方式启动，并把日志写入 tir_math/logs/
   3. 输出文件名格式：
      model_outputs-<input_stem>_<mode>_<lang>_<model_slug>.jsonl
+  4. 子命令：
+     start  后台启动任务（默认）
+     status 查看最近后台任务状态
+     stop   停止最近后台任务
+  5. Python 选择优先级：
+     --python_bin > 环境变量 MATH_EVAL_PYTHON > 开发机默认路径 > 服务器默认路径 > python3
 EOF
 }
+
+if [[ $# -gt 0 ]]; then
+    case "$1" in
+        start|status|stop)
+            COMMAND="$1"
+            shift
+            ;;
+    esac
+fi
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --python_bin)
             PYTHON_BIN="$2"
+            FORWARD_ARGS+=("$1" "$2")
             shift 2
             ;;
         --input)
             INPUT="$2"
+            FORWARD_ARGS+=("$1" "$2")
             shift 2
             ;;
         --output_dir)
             OUTPUT_DIR="$2"
+            FORWARD_ARGS+=("$1" "$2")
             shift 2
             ;;
         --api_base)
             API_BASE="$2"
+            FORWARD_ARGS+=("$1" "$2")
             shift 2
             ;;
         --model)
             MODEL="$2"
+            FORWARD_ARGS+=("$1" "$2")
             shift 2
             ;;
         --workers)
             WORKERS="$2"
+            FORWARD_ARGS+=("$1" "$2")
             shift 2
             ;;
         --limit)
             LIMIT="$2"
+            FORWARD_ARGS+=("$1" "$2")
             shift 2
             ;;
         --api_key)
             API_KEY="$2"
+            FORWARD_ARGS+=("$1" "$2")
             shift 2
             ;;
         --help|-h)
@@ -88,13 +116,74 @@ done
 
 mkdir -p "$LOG_DIR" "$PID_DIR"
 
+require_arg() {
+    local name="$1"
+    local value="$2"
+    if [[ -z "$value" ]]; then
+        echo "缺少必填参数: $name" >&2
+        usage >&2
+        exit 1
+    fi
+}
+
+detect_python_bin() {
+    if [[ -n "$PYTHON_BIN" ]]; then
+        return 0
+    fi
+
+    if [[ -n "${MATH_EVAL_PYTHON:-}" ]]; then
+        PYTHON_BIN="$MATH_EVAL_PYTHON"
+    elif [[ -x "$DEFAULT_DEV_PYTHON" ]]; then
+        PYTHON_BIN="$DEFAULT_DEV_PYTHON"
+    elif [[ -x "$DEFAULT_SERVER_PYTHON" ]]; then
+        PYTHON_BIN="$DEFAULT_SERVER_PYTHON"
+    elif command -v python3 >/dev/null 2>&1; then
+        PYTHON_BIN="$(command -v python3)"
+    else
+        echo "错误：未找到可用 Python。请显式传入 --python_bin 或设置 MATH_EVAL_PYTHON" >&2
+        exit 1
+    fi
+}
+
+latest_pid_file() {
+    find "$PID_DIR" -maxdepth 1 -type f -name 'run_all_mode_lang_*.pid' | sort | tail -n 1
+}
+
+read_pid_from_file() {
+    local pid_file="$1"
+    if [[ -f "$pid_file" ]]; then
+        tr -d '[:space:]' <"$pid_file"
+    fi
+}
+
+is_pid_running() {
+    local pid="$1"
+    [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null
+}
+
+stop_pid_and_children() {
+    local pid="$1"
+    if ! is_pid_running "$pid"; then
+        return 0
+    fi
+
+    pkill -TERM -P "$pid" 2>/dev/null || true
+    kill -TERM "$pid" 2>/dev/null || true
+    sleep 2
+
+    if is_pid_running "$pid"; then
+        pkill -KILL -P "$pid" 2>/dev/null || true
+        kill -KILL "$pid" 2>/dev/null || true
+    fi
+}
+
 normalize_input_stem() {
     local input_name stem
     input_name="$(basename "$1")"
     stem="${input_name%.jsonl}"
     stem="${stem%.json}"
     stem="${stem%.mineru}"
-    echo "$stem"
+    echo "${stem}_${RUN_DATE}"
 }
 
 normalize_model_slug() {
@@ -138,12 +227,81 @@ run_one() {
     echo "完成任务: mode=${mode}, lang=${lang} at $(date '+%Y-%m-%d %H:%M:%S')"
 }
 
+show_status() {
+    local pid_file pid log_file
+    pid_file="$(latest_pid_file)"
+    if [[ -z "$pid_file" ]]; then
+        echo "没有找到后台任务 PID 文件"
+        return 0
+    fi
+
+    pid="$(read_pid_from_file "$pid_file")"
+    log_file="${LOG_DIR}/$(basename "$pid_file" .pid).log"
+
+    echo "PID 文件: $pid_file"
+    echo "日志文件: $log_file"
+    echo "PID: ${pid:-<empty>}"
+
+    if is_pid_running "$pid"; then
+        echo "状态: 运行中"
+    else
+        echo "状态: 未运行"
+    fi
+}
+
+stop_runner() {
+    local pid_file pid
+    pid_file="$(latest_pid_file)"
+    if [[ -z "$pid_file" ]]; then
+        echo "没有找到可停止的后台任务"
+        return 0
+    fi
+
+    pid="$(read_pid_from_file "$pid_file")"
+    if [[ -z "$pid" ]]; then
+        echo "PID 文件为空: $pid_file"
+        return 1
+    fi
+
+    if is_pid_running "$pid"; then
+        stop_pid_and_children "$pid"
+        if is_pid_running "$pid"; then
+            echo "停止失败，PID 仍在运行: $pid"
+            return 1
+        fi
+        echo "已停止后台任务，PID: $pid"
+    else
+        echo "后台任务未运行，PID: $pid"
+    fi
+}
+
+if [[ "${RUNNER_MODE:-launcher}" != "worker" && "$COMMAND" == "status" ]]; then
+    show_status
+    exit 0
+fi
+
+if [[ "${RUNNER_MODE:-launcher}" != "worker" && "$COMMAND" == "stop" ]]; then
+    stop_runner
+    exit 0
+fi
+
+if [[ "$COMMAND" == "start" || "${RUNNER_MODE:-launcher}" == "worker" ]]; then
+    require_arg "--input" "$INPUT"
+    require_arg "--output_dir" "$OUTPUT_DIR"
+    require_arg "--api_base" "$API_BASE"
+    require_arg "--model" "$MODEL"
+    require_arg "--workers" "$WORKERS"
+    require_arg "--limit" "$LIMIT"
+    require_arg "--api_key" "$API_KEY"
+fi
+
 if [[ "${RUNNER_MODE:-launcher}" != "worker" ]]; then
+    detect_python_bin
     timestamp="$(date '+%Y%m%d_%H%M%S')"
     log_file="${LOG_DIR}/run_all_mode_lang_${timestamp}.log"
     pid_file="${PID_DIR}/run_all_mode_lang_${timestamp}.pid"
 
-    RUNNER_MODE=worker nohup "$SELF_PATH" "$@" >"$log_file" 2>&1 &
+    RUNNER_MODE=worker MATH_EVAL_PYTHON="$PYTHON_BIN" nohup "$SELF_PATH" start "${FORWARD_ARGS[@]}" >"$log_file" 2>&1 &
     runner_pid=$!
     echo "$runner_pid" >"$pid_file"
 
@@ -156,6 +314,7 @@ if [[ "${RUNNER_MODE:-launcher}" != "worker" ]]; then
 fi
 
 cd "$SCRIPT_DIR"
+detect_python_bin
 
 echo "后台顺序执行开始: $(date '+%Y-%m-%d %H:%M:%S')"
 echo "Python: $PYTHON_BIN"
@@ -165,9 +324,9 @@ echo "Model: $MODEL"
 echo "Workers: $WORKERS"
 echo "Limit: $LIMIT"
 
-run_one cot en
-run_one cot zh
 run_one tir en
+run_one cot en
 run_one tir zh
+run_one cot zh
 
 echo "全部任务完成: $(date '+%Y-%m-%d %H:%M:%S')"

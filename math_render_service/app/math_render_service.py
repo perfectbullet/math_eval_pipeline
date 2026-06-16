@@ -30,10 +30,37 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import uvicorn
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel, Field
 
 from app.think_tag_buffer import ThinkTagBuffer
 from app.sentence_buffer import SentenceBuffer
 from app.latex import normalize_latex_formulas
+
+
+class MathRecord(BaseModel):
+    """JSONL 中的一条数学题模型输出记录。"""
+
+    id: str = Field(..., description="题目或样本 id")
+    source: str = Field(..., description="数据来源")
+    question: str = Field(..., description="题目文本")
+    reference_answer: str = Field(..., description="参考答案")
+    model_name: str = Field(..., description="生成结果的模型名称")
+    model_output: str = Field(..., description="模型原始输出")
+    final_answer_raw: str = Field("", description="原始最终答案")
+    metadata: dict = Field(default_factory=dict, description="额外元数据")
+
+    class Config:
+        extra = "allow"
+
+
+class MathRecordUpdate(BaseModel):
+    """允许从 API 更新的题目字段。"""
+
+    question: str | None = Field(None, description="题目文本")
+    reference_answer: str | None = Field(None, description="参考答案")
+
+    class Config:
+        extra = "forbid"
 
 
 # ── 模拟流式输出 ───────────────────────────────────────────────────────────
@@ -198,6 +225,44 @@ _data: dict[str, dict] = {}
 _data_files: list[Path] = []
 
 
+def reload_data() -> dict[str, dict]:
+    """从当前数据文件重新加载记录，并清空处理缓存。"""
+    global _data
+    _data = load_jsonl_multi(_data_files)
+    _processed.clear()
+    return _data
+
+
+def update_jsonl_record(item_id: str, record: dict) -> list[Path]:
+    """将指定 id 的记录写回所有包含该 id 的 JSONL 文件。"""
+    updated_files: list[Path] = []
+    replacement = json.dumps(record, ensure_ascii=False)
+
+    for path in _data_files:
+        lines = path.read_text(encoding="utf-8").splitlines()
+        changed = False
+        new_lines: list[str] = []
+
+        for line in lines:
+            stripped = line.strip()
+            if not stripped:
+                new_lines.append(line)
+                continue
+
+            current = json.loads(stripped)
+            if current.get("id") == item_id:
+                new_lines.append(replacement)
+                changed = True
+            else:
+                new_lines.append(line)
+
+        if changed:
+            path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+            updated_files.append(path)
+
+    return updated_files
+
+
 @asynccontextmanager
 async def lifespan(application: FastAPI):
     """启动时加载原始数据（不做修复）。"""
@@ -213,7 +278,7 @@ async def lifespan(application: FastAPI):
         print(f"加载数据: {p}")
     _data_files = file_paths
     _init_output_paths(file_paths)
-    _data = load_jsonl_multi(file_paths)
+    reload_data()
     print(f"共 {len(_data)} 条记录")
     yield
 
@@ -254,6 +319,15 @@ def _find_default_file() -> Path | None:
     return None
 
 
+def _item_id_sort_key(item_id: str) -> tuple[str, int, str]:
+    """按 id 前缀和末尾数字排序，例如 MATH-001 < MATH-247。"""
+    match = re.match(r"^(.*?)(\d+)$", item_id)
+    if not match:
+        return (item_id, -1, item_id)
+    prefix, number = match.groups()
+    return (prefix, int(number), item_id)
+
+
 # ── API 端点 ───────────────────────────────────────────────────────────────
 
 @app.get("/")
@@ -267,8 +341,38 @@ def health():
 
 @app.get("/ids")
 def list_ids():
-    """返回所有 id 列表。"""
-    return list(_data.keys())
+    """重新加载数据并返回所有 id 列表。"""
+    reload_data()
+    return sorted(_data.keys(), key=_item_id_sort_key)
+
+
+@app.put("/scores/{item_id}")
+def update_score(item_id: str, patch: MathRecordUpdate):
+    """按 item_id 更新 question/reference_answer，并标记需要重新推理。"""
+    reload_data()
+    if item_id not in _data:
+        raise HTTPException(status_code=404, detail=f"id '{item_id}' 未找到")
+
+    updates = patch.dict(exclude_unset=True)
+    if not updates:
+        raise HTTPException(status_code=400, detail="至少需要提供 question 或 reference_answer")
+
+    record = dict(_data[item_id])
+    changed = False
+    for field_name, value in updates.items():
+        if record.get(field_name) != value:
+            record[field_name] = value
+            changed = True
+
+    if changed:
+        record["needs_model_rerun"] = True
+
+    updated_files = update_jsonl_record(item_id, record)
+    if not updated_files:
+        raise HTTPException(status_code=404, detail=f"id '{item_id}' 未在数据文件中找到")
+
+    reload_data()
+    return _data[item_id]
 
 
 @app.get("/scores/{item_id}")

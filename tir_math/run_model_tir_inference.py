@@ -42,6 +42,7 @@ def run_tir_query(bot: TIRMathAgent, question: str) -> tuple[str, dict]:
         messages = [{"role": "user", "content": question}]
         last_response = None
         for response in bot.run(messages):
+            
             last_response = response
 
         # 从最后的响应中提取 assistant 内容
