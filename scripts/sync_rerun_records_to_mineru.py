@@ -10,7 +10,8 @@ Only these fields are overwritten in the MinerU records:
 - reference_answer
 - needs_model_rerun
 
-The output is written to a new JSON file by default. Use --dry-run first.
+The output is written to a new JSON file and a matching JSONL file by default.
+Use --dry-run first.
 """
 
 from __future__ import annotations
@@ -61,7 +62,16 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help=(
             "output MinerU JSON file. Default: replace the date in "
-            "--mineru-input with today's YYYYMMDD."
+            "--mineru-input with today's YYYYMMDD. A same-stem .jsonl file "
+            "is also written."
+        ),
+    )
+    parser.add_argument(
+        "--jsonl-output",
+        default=None,
+        help=(
+            "output MinerU JSONL file. Default: same as --output but with "
+            "the .json suffix replaced by .jsonl."
         ),
     )
     parser.add_argument(
@@ -72,12 +82,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--overwrite",
         action="store_true",
-        help="allow overwriting an existing output file.",
+        help="allow overwriting existing output files.",
     )
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="print what would be updated without writing the output file.",
+        help="print what would be updated without writing the output files.",
     )
     parser.add_argument(
         "--preview-limit",
@@ -129,6 +139,27 @@ def resolve_output_path(path_text: str | None, mineru_input: Path) -> Path:
     else:
         output_name = f"{mineru_input.stem}_{today}{mineru_input.suffix}"
     return mineru_input.with_name(output_name)
+
+
+def resolve_optional_output_path(path_text: str | None, default_path: Path) -> Path:
+    if path_text:
+        raw = Path(path_text).expanduser()
+        if raw.is_absolute():
+            return raw
+
+        cwd_path = Path.cwd() / raw
+        repo_path = REPO_ROOT / raw
+        if cwd_path.parent.exists() and not repo_path.parent.exists():
+            return cwd_path.resolve()
+        return repo_path.resolve()
+
+    return default_path
+
+
+def default_jsonl_output_path(json_output_path: Path) -> Path:
+    if json_output_path.name.endswith(".json"):
+        return json_output_path.with_name(f"{json_output_path.name[:-5]}.jsonl")
+    return json_output_path.with_suffix(f"{json_output_path.suffix}.jsonl")
 
 
 def require_file(path: Path, label: str) -> None:
@@ -254,10 +285,17 @@ def apply_updates(
     return updated_count, missing_ids
 
 
-def write_json_atomic(output_path: Path, records: List[Dict[str, Any]], overwrite: bool) -> None:
-    if output_path.exists() and not overwrite:
-        raise SyncError(f"output already exists: {output_path}. Use --overwrite to replace it.")
+def check_output_paths(json_output_path: Path, jsonl_output_path: Path, overwrite: bool) -> None:
+    if json_output_path == jsonl_output_path:
+        raise SyncError(f"JSON output and JSONL output cannot be the same path: {json_output_path}")
 
+    existing = [path for path in (json_output_path, jsonl_output_path) if path.exists()]
+    if existing and not overwrite:
+        existing_text = ", ".join(str(path) for path in existing)
+        raise SyncError(f"output already exists: {existing_text}. Use --overwrite to replace it.")
+
+
+def write_json_atomic(output_path: Path, records: List[Dict[str, Any]]) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = output_path.with_name(f".{output_path.name}.tmp")
 
@@ -278,11 +316,43 @@ def write_json_atomic(output_path: Path, records: List[Dict[str, Any]], overwrit
             raise
 
 
+def write_jsonl_atomic(output_path: Path, records: List[Dict[str, Any]]) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = output_path.with_name(f".{output_path.name}.tmp")
+
+    try:
+        with tmp_path.open("w", encoding="utf-8") as f:
+            for record in records:
+                f.write(json.dumps(record, ensure_ascii=False))
+                f.write("\n")
+
+        # Re-read every line so a broken JSONL file is never promoted.
+        with tmp_path.open("r", encoding="utf-8") as f:
+            for line_no, line in enumerate(f, start=1):
+                text = line.strip()
+                if not text:
+                    continue
+                try:
+                    item = json.loads(text)
+                except json.JSONDecodeError as exc:
+                    raise SyncError(f"invalid JSONL written at {tmp_path}:{line_no}: {exc}") from exc
+                if not isinstance(item, dict):
+                    raise SyncError(f"JSONL line must be an object at {tmp_path}:{line_no}")
+
+        os.replace(tmp_path, output_path)
+    except Exception:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        finally:
+            raise
+
+
 def print_summary(
     *,
     model_output: Path,
     mineru_input: Path,
-    output_path: Path,
+    json_output_path: Path,
+    jsonl_output_path: Path,
     total_mineru: int,
     total_updates: int,
     updated_count: int,
@@ -295,7 +365,8 @@ def print_summary(
     print("=" * 80)
     print(f"model_output:       {model_output}")
     print(f"mineru_input:       {mineru_input}")
-    print(f"output:             {output_path}")
+    print(f"json_output:        {json_output_path}")
+    print(f"jsonl_output:       {jsonl_output_path}")
     print(f"dry_run:            {dry_run}")
     print(f"mineru records:     {total_mineru}")
     print(f"rerun updates:      {total_updates}")
@@ -316,7 +387,11 @@ def main() -> int:
     try:
         model_output = resolve_existing_path(args.model_output)
         mineru_input = resolve_existing_path(args.mineru_input)
-        output_path = resolve_output_path(args.output, mineru_input)
+        json_output_path = resolve_output_path(args.output, mineru_input)
+        jsonl_output_path = resolve_optional_output_path(
+            args.jsonl_output,
+            default_jsonl_output_path(json_output_path),
+        )
 
         require_file(model_output, "model output")
         require_file(mineru_input, "MinerU input")
@@ -332,7 +407,8 @@ def main() -> int:
         print_summary(
             model_output=model_output,
             mineru_input=mineru_input,
-            output_path=output_path,
+            json_output_path=json_output_path,
+            jsonl_output_path=jsonl_output_path,
             total_mineru=len(mineru_records),
             total_updates=len(updates),
             updated_count=updated_count,
@@ -345,8 +421,11 @@ def main() -> int:
             print("\nDRY-RUN: no file written.")
             return 0
 
-        write_json_atomic(output_path, mineru_records, overwrite=args.overwrite)
-        print(f"\nDone. Wrote: {output_path}")
+        check_output_paths(json_output_path, jsonl_output_path, overwrite=args.overwrite)
+        write_json_atomic(json_output_path, mineru_records)
+        write_jsonl_atomic(jsonl_output_path, mineru_records)
+        print(f"\nDone. Wrote: {json_output_path}")
+        print(f"Done. Wrote: {jsonl_output_path}")
         return 0
     except SyncError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
