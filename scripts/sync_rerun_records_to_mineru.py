@@ -177,13 +177,9 @@ def read_jsonl_updates(model_output: Path) -> Dict[str, Dict[str, Any]]:
                     f"{', '.join(missing_fields)}"
                 )
 
-            if not isinstance(record.get("question"), str):
-                raise SyncError(f"record {item_id!r} has non-string question at line {line_no}")
-            if not isinstance(record.get("reference_answer"), str):
-                raise SyncError(
-                    f"record {item_id!r} has non-string reference_answer at line {line_no}"
-                )
-
+            # question/reference_answer come from the edit API output and may be
+            # strings, null, lists, or other JSON values. Keep them exactly as
+            # saved instead of forcing them to strings.
             updates[item_id] = {
                 "question": record["question"],
                 "reference_answer": record["reference_answer"],
