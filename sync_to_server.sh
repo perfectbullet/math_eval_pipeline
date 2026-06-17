@@ -58,6 +58,7 @@ echo ""
 
 # 排除项列表
 EXCLUDES=(
+    "*.csv"
     "*.jsonl"
     "*.json"
     "results/*"

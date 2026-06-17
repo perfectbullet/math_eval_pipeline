@@ -157,12 +157,17 @@ def process_one(
     fout,
     mode,
     lang,
+    submitted_at: float,
 ) -> dict:
     """单个 worker 处理一条题目：独立创建 bot → 推理 → 写入结果。"""
     qid = record["id"]
     question = record["question"]
+    queue_wait_seconds = round(time.time() - submitted_at, 2)
     started_at = datetime.now().isoformat(timespec="seconds")
-    print(f"  [START] {qid} mode={mode} lang={lang}")
+    print(
+        f"  [START] {qid} mode={mode} lang={lang} "
+        f"queue_wait={queue_wait_seconds}s"
+    )
 
     # 每个 worker 独立创建 bot，避免共享 agent 内部状态。
     if mode == "tir":
@@ -178,6 +183,7 @@ def process_one(
         )
     model_output, meta = run_agent_query(bot, question)
     finished_at = datetime.now().isoformat(timespec="seconds")
+    total_elapsed_seconds = round(time.time() - submitted_at, 2)
 
     result = {
         "id": qid,
@@ -194,6 +200,9 @@ def process_one(
             "agent_type": agent_type,
             "started_at": started_at,
             "finished_at": finished_at,
+            "submitted_at": datetime.fromtimestamp(submitted_at).isoformat(timespec="seconds"),
+            "queue_wait_seconds": queue_wait_seconds,
+            "total_elapsed_seconds": total_elapsed_seconds,
             "retry_count": 0,
             **meta,
         },
@@ -354,12 +363,14 @@ def main():
                     fout,
                     args.mode,
                     args.lang,
+                    submitted_at,
                 ): {
                     "record": record,
-                    "submitted_at": time.time(),
+                    "submitted_at": submitted_at,
                     "warned": False,
                 }
                 for record in pending
+                for submitted_at in [time.time()]
             }
             pending_futures = set(future_info.keys())
 
@@ -396,7 +407,7 @@ def main():
                             if elapsed >= args.warn_after and not info["warned"]:
                                 qid = info["record"]["id"]
                                 print(
-                                    f"  [WARN] {qid} 运行 {elapsed:.1f}s 仍未完成，"
+                                    f"  [WARN] {qid} 自提交起 {elapsed:.1f}s 仍未完成，"
                                     f"mode={args.mode}, lang={args.lang}"
                                 )
                                 info["warned"] = True
@@ -413,7 +424,9 @@ def main():
                                 success += 1
                                 print(
                                     f"  [OK] {result['id']} "
-                                    f"({result['metadata'].get('latency_seconds', '?')}s)"
+                                    f"(queue={result['metadata'].get('queue_wait_seconds', '?')}s, "
+                                    f"run={result['metadata'].get('latency_seconds', '?')}s, "
+                                    f"total={result['metadata'].get('total_elapsed_seconds', '?')}s)"
                                 )
                         except Exception as e:
                             failed += 1
