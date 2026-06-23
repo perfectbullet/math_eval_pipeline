@@ -151,6 +151,46 @@ class SentenceBuffer:
             return True
         return False
 
+    def _iter_unescaped_display_math_ranges(self, text: str):
+        """Yield ranges covered by complete unescaped $$...$$ blocks."""
+        i = 0
+        opening = None
+        while i < len(text) - 1:
+            if text[i:i + 2] == '$$' and (i == 0 or text[i - 1] != '\\'):
+                if opening is None:
+                    opening = i
+                else:
+                    yield opening, i + 2
+                    opening = None
+                i += 2
+                continue
+            i += 1
+
+    def _is_safe_latex_split_position(self, text: str, split_pos: int) -> bool:
+        """Return False if a split would break LaTeX delimiters or content."""
+        if split_pos <= 0 or split_pos > len(text):
+            return True
+
+        # Never split between the two characters of a $$ delimiter.
+        if text[split_pos - 1:split_pos + 1] == '$$':
+            return False
+
+        # Protect the entire complete display-math span, except after closing $$.
+        for start, end in self._iter_unescaped_display_math_ranges(text):
+            if split_pos == end:
+                return True
+            if start < split_pos < end:
+                return False
+
+        # Count-based fallback for inline $, \( ... \), \[ ... \], environments,
+        # and bare \boxed{...}. Check both sides of the boundary.
+        if self._is_in_latex_formula(text, split_pos - 1):
+            return False
+        if self._is_in_latex_formula(text, split_pos):
+            return False
+
+        return True
+
     def _is_inside_bare_boxed(self, text: str) -> bool:
         """Check if text ends inside a bare (not in $...$) \\boxed{...}."""
         for m in self._BARE_BOXED_PATTERN.finditer(text):
@@ -267,7 +307,7 @@ class SentenceBuffer:
             if i < len(text) and text[i] in ' \n\t':
                 if self._is_decimal_near_position(text, i):
                     continue
-                if not self._is_in_latex_formula(text, i):
+                if self._is_safe_latex_split_position(text, i):
                     return i, "char_limit_space"
 
         # Fallback: find punctuation as split point
@@ -277,7 +317,7 @@ class SentenceBuffer:
                 split_pos = pos + 1
                 if self._is_decimal_near_position(text, pos):
                     continue
-                if not self._is_in_latex_formula(text, split_pos - 1):
+                if self._is_safe_latex_split_position(text, split_pos):
                     return split_pos, "char_limit_punctuation"
 
         return -1, "no_split"
@@ -421,7 +461,7 @@ class SentenceBuffer:
             if matched_char == '.' and self._is_decimal_point(text, pos):
                 continue
 
-            if not self._is_in_latex_formula(text, pos - 1):
+            if self._is_safe_latex_split_position(text, pos):
                 if has_complete and pos < len(text) and self._would_split_complete_formula(text, pos):
                     continue
                 return pos, "sentence_end"
@@ -430,7 +470,7 @@ class SentenceBuffer:
         if not unclosed_delimiter and len(text) >= self.comma_split_threshold:
             for match in reversed(list(self.COMMA_PATTERN.finditer(text))):
                 pos = match.end()
-                if not self._is_in_latex_formula(text, pos - 1):
+                if self._is_safe_latex_split_position(text, pos):
                     return pos, "comma"
 
         # Character limit forced splitting
@@ -454,7 +494,10 @@ class SentenceBuffer:
             if pos > 0:
                 return pos, reason
 
-            return min(extended_limit, len(text)), "char_limit_forced"
+            forced_pos = min(extended_limit, len(text))
+            if forced_pos < len(text) and not self._is_safe_latex_split_position(text, forced_pos):
+                return -1, "waiting_for_complete_formula"
+            return forced_pos, "char_limit_forced"
 
         # Buffer not full — if unclosed formula, wait for more tokens
         if unclosed_delimiter:
@@ -632,7 +675,11 @@ class SentenceBuffer:
 
         split_pos, split_reason = self._find_safe_split_position(self.buffer)
 
-        if split_pos > 0 and '$$' in self.buffer[:10]:
+        if (
+            split_pos > 0
+            and '$$' in self.buffer[:10]
+            and not self._is_safe_latex_split_position(self.buffer, split_pos)
+        ):
             logger.warning(
                 f"[SentenceBuffer.add] SPLITTING formula! buffer_len={len(self.buffer)}, "
                 f"split_pos={split_pos}, reason={split_reason}"

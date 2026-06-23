@@ -69,6 +69,15 @@ LOGIC_CORRECT_THRESHOLD = 0.70
 DEFAULT_SYSTEM_PROMPT = "Please reason step by step, and put your final answer within \\boxed{}."
 
 
+def _as_text(value: Any) -> str:
+    """把 JSON 字段安全转为文本，兼容 None。"""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    return str(value)
+
+
 def _merge_paragraphs(paragraphs: list[str], min_length: int = 20) -> list[str]:
     """后处理：过滤装饰行，合并过短段落到相邻步骤。
 
@@ -461,7 +470,7 @@ def main():
             record = json.loads(line)
             if not record.get("verify_correct", False):
                 # 跳过模型输出为空的样本
-                output = record.get("model_output", "").strip()
+                output = _as_text(record.get("model_output", "")).strip()
                 if not output:
                     skipped_empty += 1
                     continue
@@ -498,9 +507,9 @@ def main():
     # 评分
     results = []
     for i, sample in enumerate(wrong_samples):
-        qid = sample.get("id", f"unknown_{i}")
-        question = sample.get("question", "")
-        model_output = sample.get("model_output", "")
+        qid = _as_text(sample.get("id")) or f"unknown_{i}"
+        question = _as_text(sample.get("question", ""))
+        model_output = _as_text(sample.get("model_output", ""))
 
         print(f"  [{i + 1}/{len(wrong_samples)}] 评分: {qid}")
 
@@ -521,11 +530,11 @@ def main():
 
         result = {
             "id": qid,
-            "source": sample.get("source", ""),
-            "model_name": sample.get("model_name", ""),
+            "source": _as_text(sample.get("source", "")),
+            "model_name": _as_text(sample.get("model_name", "")),
             "verify_correct": False,
             "question": question,
-            "reference_answer": sample.get("reference_answer", ""),
+            "reference_answer": _as_text(sample.get("reference_answer", "")),
             "model_output": model_output,
             **prm_result,
             "prm_logic_correct": logic_correct,
@@ -731,7 +740,7 @@ def _write_error_html(results: list[dict], output_dir: Path):
     html_dir.mkdir(parents=True, exist_ok=True)
 
     for r in results:
-        rid = r.get("id", "unknown")
+        rid = _as_text(r.get("id")) or "unknown"
         title = f"PRM 错误样本 - {rid}"
         buf = _KATEX_HEAD.format(title=title)
 
@@ -744,9 +753,9 @@ def _write_error_html(results: list[dict], output_dir: Path):
         }
         buf += '<div class="meta">\n'
         buf += f'  <span class="tag tag-id">{html.escape(rid)}</span>\n'
-        buf += f'  <span class="tag tag-source">{html.escape(r.get("source", ""))}</span>\n'
-        buf += f'  <span class="tag tag-model">{html.escape(r.get("model_name", ""))}</span>\n'
-        buf += f'  <span class="tag tag-category">{html.escape(category_map.get(category, "") or category)}</span>\n'
+        buf += f'  <span class="tag tag-source">{html.escape(_as_text(r.get("source", "")))}</span>\n'
+        buf += f'  <span class="tag tag-model">{html.escape(_as_text(r.get("model_name", "")))}</span>\n'
+        buf += f'  <span class="tag tag-category">{html.escape(_as_text(category_map.get(category, "") or category))}</span>\n'
         logic_ok = r.get("prm_logic_correct", False)
         buf += f'  <span class="tag tag-correct">逻辑{"✓" if logic_ok else "✗"}</span>\n'
         buf += '</div>\n'
@@ -765,13 +774,13 @@ def _write_error_html(results: list[dict], output_dir: Path):
         buf += '  </div>\n</div>\n'
 
         # 题目
-        q_html = _safe_markdown(r.get("question", ""))
+        q_html = _safe_markdown(_as_text(r.get("question", "")))
         buf += '<div class="section">\n'
         buf += f'  <div class="section-title">题目</div>\n'
         buf += f'  <div class="section-content">{q_html}</div>\n</div>\n'
 
         # 标准答案（纯文本，KaTeX 浏览器端渲染 $...$）
-        a_html = html.escape(r.get("reference_answer", ""))
+        a_html = html.escape(_as_text(r.get("reference_answer", "")))
         buf += '<div class="section">\n'
         buf += '  <div class="section-title">标准答案</div>\n'
         buf += f'  <div class="section-content">{a_html}</div>\n</div>\n'
@@ -789,7 +798,7 @@ def _write_error_html(results: list[dict], output_dir: Path):
                 css_class = "first-wrong" if is_first_wrong else slabel
                 bar_width = int(score * 100)
                 bar_color = "green" if score >= 0.45 else "red"
-                stext = _safe_markdown(s.get("text", ""))
+                stext = _safe_markdown(_as_text(s.get("text", "")))
                 buf += f'  <div class="step-card {css_class}">\n'
                 buf += f'    <div class="step-header">\n'
                 buf += f'      <span class="step-num">步骤 {idx}</span>\n'
@@ -803,7 +812,7 @@ def _write_error_html(results: list[dict], output_dir: Path):
             buf += '</div>\n'
 
         # 模型输出
-        out_html = _safe_markdown(r.get("model_output", ""))
+        out_html = _safe_markdown(_as_text(r.get("model_output", "")))
         buf += '<div class="section">\n'
         buf += '  <div class="section-title">模型输出</div>\n'
         buf += f'  <div class="section-content">{out_html}</div>\n</div>\n'

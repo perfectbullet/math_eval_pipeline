@@ -47,3 +47,4 @@ external/Qwen-Agent/
 # Runtime artifacts
 tir_math/run_pids/
 reports/*
+data/model_outputs/math_qa_275/model_outputs-math_qa_275_20260612_tir_en_qwen3-32b.jsonl

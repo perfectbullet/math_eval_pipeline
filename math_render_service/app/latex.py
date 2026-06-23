@@ -488,6 +488,29 @@ def wrap_bare_environments(text: str) -> str:
     return ''.join(result)
 
 
+def fix_degree_limit_superscripts(text: str) -> str:
+    r"""
+    修复角度极限中的连续上标。
+
+    KaTeX/MathJax 会把 `90^\circ^-` 解析为 double superscript。
+    在 `\circ` 后补一个空分组，让单侧极限符号绑定到独立空基底。
+
+    Examples:
+        >>> fix_degree_limit_superscripts(r"$B \to 90^\circ^-$")
+        '$B \to 90^\circ{}^{-}$'
+        >>> fix_degree_limit_superscripts(r"$B \to 30^\circ^+$")
+        '$B \to 30^\circ{}^{+}$'
+    """
+    if not text or r'\circ^' not in text:
+        return text
+
+    return re.sub(
+        r'(\\circ)\s*\^\s*(?:\{?\s*([+-])\s*\}?)',
+        r'\1{}^{\2}',
+        text,
+    )
+
+
 def normalize_latex_formulas(text: str) -> str:
     r"""
     执行完整的 LaTeX 公式规范化。
@@ -520,6 +543,7 @@ def normalize_latex_formulas(text: str) -> str:
     text = convert_tabular_to_array(text)
     text = wrap_bare_environments(text)
     text = re.sub(r'\\text\b', r'\\mathrm', text)
+    text = fix_degree_limit_superscripts(text)
     return text
 
 

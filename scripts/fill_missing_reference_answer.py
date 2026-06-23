@@ -24,7 +24,7 @@ DEFAULT_SOURCE = (
     "model_outputs-math_qa_275_20260612_tir_en_qwen3-32b.jsonl"
 )
 DEFAULT_TARGET = "data/math_qa_275_20260617.mineru.jsonl"
-DEFAULT_OUTPUT = "data/math_qa_275_20260617.mineru.filled_reference_answer.jsonl"
+DEFAULT_OUTPUT = "data/math_qa_275_20260617.mineru.filled_reference_answer-v2.jsonl"
 
 
 class FillError(RuntimeError):
